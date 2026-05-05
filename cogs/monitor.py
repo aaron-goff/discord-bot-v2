@@ -897,5 +897,33 @@ class MonitorCog(commands.Cog):
         await self._post_hr_alert(ctx.channel, mock_hr)
 
 
+    @commands.command(name="hr_test")
+    async def hr_test(self, ctx):
+        """Test HR alert with mock data. Usage: !hr_test"""
+        mock_hr = {
+            "batter":      "Mickey Moniak",
+            "batter_team": "COL",
+            "pitcher":     "Corbin Burnes",
+            "pitcher_team": "ATH",
+            "away":        "ATH",
+            "home":        "COL",
+            "dist":        438,
+            "ev":          112.4,
+            "la":          28,
+            "pitch_type":  "Four-Seam Fastball",
+            "pitch_speed": 95.2,
+            "rbi":         2,
+            "num":         11,
+            "inning":      "bot 5",
+            "desc":        "Mickey Moniak homers (11) on a fly ball to left center field. Charlie Blackmon scores.",
+            "play_id":     None,
+            "game_pk":     0,
+            "video_url":   "",
+            "video_blurb": "",
+        }
+        await ctx.message.delete()
+        await self._post_hr_alert(ctx.channel, mock_hr)
+
+
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(MonitorCog(bot))
