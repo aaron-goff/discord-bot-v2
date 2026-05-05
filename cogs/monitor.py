@@ -315,10 +315,12 @@ class MonitorCog(commands.Cog):
         if not hit_play:
             return
 
-        about  = hit_play.get("about", {})
-        inning = about.get("inning", 0)
-        is_top = about.get("halfInning", "top") == "top"
-        desc   = hit_play.get("result", {}).get("description", "")
+        about   = hit_play.get("about", {})
+        inning  = about.get("inning", 0)
+        is_top  = about.get("halfInning", "top") == "top"
+        desc    = hit_play.get("result", {}).get("description", "")
+        pitcher = hit_play.get("matchup", {}).get("pitcher", {}).get("fullName", "")
+        batter  = hit_play.get("matchup", {}).get("batter",  {}).get("fullName", "")
 
         if not pitching_abbr:
             pitching_abbr = home_abbr if is_top else away_abbr
@@ -330,11 +332,17 @@ class MonitorCog(commands.Cog):
         alert_word = "perfect game" if was_perfect else "no-hitter"
         title = f"💔 {pitching_abbr}'s {alert_word} is over"
 
+        if desc and pitcher:
+            desc_fmt  = desc.replace(batter, f"**{batter}**", 1) if batter else desc
+            play_text = f"With **{pitcher}** pitching, {desc_fmt}"
+        else:
+            play_text = desc
+
         embed = discord.Embed(title=title, color=discord.Color.blue())
         embed.add_field(name="Score",  value=score_line,                    inline=True)
         embed.add_field(name="Inning", value=_inning_label(inning, is_top), inline=True)
-        if desc:
-            embed.add_field(name="Play", value=desc, inline=False)
+        if play_text:
+            embed.add_field(name="Play", value=play_text, inline=False)
 
         try:
             await channel.send(embed=embed)
@@ -687,64 +695,132 @@ class MonitorCog(commands.Cog):
         print("[monitor] bot ready — monitor loop started")
 
     @commands.command(name="nh_test")
-    async def nh_test(self, ctx, perfect: str = "no"):
-        """Test NH alerts with mock data. Usage: !nh_test [perfect]"""
-        is_perfect = perfect.lower() in ("yes", "perfect", "pg", "true")
-        mock_feed = {
-            "gameData": {
-                "flags": {"noHitter": True, "perfectGame": is_perfect},
-                "status": {"abstractGameState": "Live"},
-                "teams": {
-                    "away": {"abbreviation": "NYY"},
-                    "home": {"abbreviation": "WSH"},
-                },
-            },
-            "liveData": {
-                "linescore": {
-                    "currentInning": 7,
-                    "isTopInning": False,
-                    "outs": 2,
+    async def nh_test(self, ctx, *args):
+        """Test NH alerts with mock data. Usage: !nh_test [away] [perfect]"""
+        args_lower  = [a.lower() for a in args]
+        is_perfect  = any(a in ("perfect", "pg", "yes", "true") for a in args_lower)
+        away_pitching = "away" in args_lower
+
+        if away_pitching:
+            # NYY (away) pitching NH vs WSH (home, 0 hits)
+            # NYY has hits (top half) — those should be skipped
+            # WSH breaks it with a bottom-half hit in the 8th
+            mock_feed = {
+                "gameData": {
+                    "flags": {"noHitter": True, "perfectGame": is_perfect},
+                    "status": {"abstractGameState": "Live"},
                     "teams": {
-                        "away": {"runs": 0, "hits": 0},
-                        "home": {"runs": 3, "hits": 7},
+                        "away": {"abbreviation": "NYY"},
+                        "home": {"abbreviation": "WSH"},
                     },
                 },
-                "boxscore": {
-                    "teams": {
-                        "home": {
-                            "pitchers": [700001],
-                            "players": {
-                                "ID700001": {
-                                    "person": {"fullName": "MacKenzie Gore"},
-                                    "stats": {"pitching": {"inningsPitched": "6.2", "baseOnBalls": 1, "strikeOuts": 8, "pitchesThrown": 98}},
-                                }
-                            },
+                "liveData": {
+                    "linescore": {
+                        "currentInning": 7,
+                        "isTopInning": True,
+                        "outs": 2,
+                        "teams": {
+                            "away": {"runs": 3, "hits": 7},
+                            "home": {"runs": 0, "hits": 0},
+                        },
+                    },
+                    "boxscore": {
+                        "teams": {
+                            "away": {
+                                "pitchers": [700002],
+                                "players": {
+                                    "ID700002": {
+                                        "person": {"fullName": "Gerrit Cole"},
+                                        "stats": {"pitching": {"inningsPitched": "6.2", "baseOnBalls": 0, "strikeOuts": 10, "pitchesThrown": 92}},
+                                    }
+                                },
+                            }
                         }
-                    }
+                    },
+                    "plays": {
+                        "allPlays": [
+                            # Away team (NYY) hits earlier — these should NOT be reported as the breaking play
+                            {
+                                "result": {"eventType": "home_run", "event": "Home Run", "description": "Aaron Judge homers (12) on a fly ball to left field."},
+                                "matchup": {"batter": {"fullName": "Aaron Judge"}, "pitcher": {"fullName": "MacKenzie Gore"}},
+                                "about": {"inning": 3, "halfInning": "top", "atBatIndex": 8},
+                            },
+                            {
+                                "result": {"eventType": "single", "event": "Single", "description": "Juan Soto singles on a line drive to right field."},
+                                "matchup": {"batter": {"fullName": "Juan Soto"}, "pitcher": {"fullName": "MacKenzie Gore"}},
+                                "about": {"inning": 5, "halfInning": "top", "atBatIndex": 14},
+                            },
+                            # Home team (WSH) breaks the NH in the 8th — this is the correct play
+                            {
+                                "result": {"eventType": "single", "event": "Single", "description": "CJ Abrams singles on a ground ball up the middle."},
+                                "matchup": {"batter": {"fullName": "CJ Abrams"}, "pitcher": {"fullName": "Gerrit Cole"}},
+                                "about": {"inning": 8, "halfInning": "bottom", "atBatIndex": 24},
+                            },
+                        ]
+                    },
                 },
-                "plays": {
-                    "allPlays": [
-                        # Home team (WSH) hits earlier in the game — these should NOT be reported as the breaking play
-                        {
-                            "result": {"eventType": "single", "event": "Single", "description": "CJ Abrams singles on a ground ball to second base."},
-                            "matchup": {"batter": {"fullName": "CJ Abrams"}, "pitcher": {"fullName": "Gerrit Cole"}},
-                            "about": {"inning": 2, "halfInning": "bottom", "atBatIndex": 5},
-                        },
-                        {
-                            "result": {"eventType": "home_run", "event": "Home Run", "description": "Jesse Winker homers (3) on a fly ball to left field."},
-                            "matchup": {"batter": {"fullName": "Jesse Winker"}, "pitcher": {"fullName": "Gerrit Cole"}},
-                            "about": {"inning": 4, "halfInning": "bottom", "atBatIndex": 13},
-                        },
-                        # Away team (NYY) breaks the NH in the 8th — this is the correct play
-                        {
-                            "result": {"eventType": "single", "event": "Single", "description": "Gleyber Torres singles on a line drive to left field."},
-                            "matchup": {"batter": {"fullName": "Gleyber Torres"}, "pitcher": {"fullName": "MacKenzie Gore"}},
-                            "about": {"inning": 8, "halfInning": "top", "atBatIndex": 24},
-                        },
-                    ]
+            }
+            pitching_abbr = "NYY"
+        else:
+            # WSH (home) pitching NH vs NYY (away, 0 hits)
+            # WSH has hits (bottom half) — those should be skipped
+            # NYY breaks it with a top-half hit in the 8th
+            mock_feed = {
+                "gameData": {
+                    "flags": {"noHitter": True, "perfectGame": is_perfect},
+                    "status": {"abstractGameState": "Live"},
+                    "teams": {
+                        "away": {"abbreviation": "NYY"},
+                        "home": {"abbreviation": "WSH"},
+                    },
                 },
-            },
-        }
+                "liveData": {
+                    "linescore": {
+                        "currentInning": 7,
+                        "isTopInning": False,
+                        "outs": 2,
+                        "teams": {
+                            "away": {"runs": 0, "hits": 0},
+                            "home": {"runs": 3, "hits": 7},
+                        },
+                    },
+                    "boxscore": {
+                        "teams": {
+                            "home": {
+                                "pitchers": [700001],
+                                "players": {
+                                    "ID700001": {
+                                        "person": {"fullName": "MacKenzie Gore"},
+                                        "stats": {"pitching": {"inningsPitched": "6.2", "baseOnBalls": 1, "strikeOuts": 8, "pitchesThrown": 98}},
+                                    }
+                                },
+                            }
+                        }
+                    },
+                    "plays": {
+                        "allPlays": [
+                            # Home team (WSH) hits earlier — these should NOT be reported as the breaking play
+                            {
+                                "result": {"eventType": "single", "event": "Single", "description": "CJ Abrams singles on a ground ball to second base."},
+                                "matchup": {"batter": {"fullName": "CJ Abrams"}, "pitcher": {"fullName": "Gerrit Cole"}},
+                                "about": {"inning": 2, "halfInning": "bottom", "atBatIndex": 5},
+                            },
+                            {
+                                "result": {"eventType": "home_run", "event": "Home Run", "description": "Jesse Winker homers (3) on a fly ball to left field."},
+                                "matchup": {"batter": {"fullName": "Jesse Winker"}, "pitcher": {"fullName": "Gerrit Cole"}},
+                                "about": {"inning": 4, "halfInning": "bottom", "atBatIndex": 13},
+                            },
+                            # Away team (NYY) breaks the NH in the 8th — this is the correct play
+                            {
+                                "result": {"eventType": "single", "event": "Single", "description": "Gleyber Torres singles on a line drive to left field."},
+                                "matchup": {"batter": {"fullName": "Gleyber Torres"}, "pitcher": {"fullName": "MacKenzie Gore"}},
+                                "about": {"inning": 8, "halfInning": "top", "atBatIndex": 24},
+                            },
+                        ]
+                    },
+                },
+            }
+            pitching_abbr = "WSH"
 
         await ctx.message.delete()
         # In-progress alert (no delay)
@@ -752,7 +828,7 @@ class MonitorCog(commands.Cog):
         # Broken-up alert (no delay)
         mock_feed["gameData"]["flags"]["noHitter"] = False
         mock_feed["gameData"]["flags"]["perfectGame"] = False
-        await self._post_nh_broken_alert(ctx.channel, mock_feed, is_perfect)
+        await self._post_nh_broken_alert(ctx.channel, mock_feed, is_perfect, pitching_abbr=pitching_abbr)
 
 
     @commands.command(name="hr_test")
