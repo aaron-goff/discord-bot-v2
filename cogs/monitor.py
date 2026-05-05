@@ -36,6 +36,7 @@ WAKEUP_WINDOW_MINUTES = 30                  # Start polling when a game is this 
 HR_DISTANCE_THRESHOLD = 420                 # Feet — minimum projected distance for alert
 HR_ALWAYS_ALERT_TEAM  = "WSH"              # Always alert for this team's HRs regardless of distance
 HR_STATE_FILE         = "hr_posted.json"   # Persists posted HR keys across restarts
+NH_STATE_FILE         = "nh_state.json"    # Persists NH alert state across restarts
 VIDEO_WAIT_MAX_CYCLES = 10                  # Poll cycles to wait for highlight video
 NH_ALERT_DELAY        = 15                  # Seconds to delay NH alerts (stream spoiler protection)
 
@@ -80,10 +81,9 @@ class MonitorCog(commands.Cog):
         self._scheduled_games: dict = {}
         self._schedule_date = None   # YYYY-MM-DD string of the schedule we fetched
 
-        # No-hitter tracking: {game_pk: {"key": alert_key, "perfect": bool}}
-        # We post once per half-inning transition.
+        # No-hitter tracking — loaded from disk so restarts don't lose state
         self._nh_alerted: dict = {}
-        self._nh_broken_posted: set = set()  # game_pks where break-up alert already sent
+        self._nh_broken_posted: set = set()
 
         # HR tracking
         self._hr_pending: dict = {}  # {hr_key: {"cycles_waited": int, "data": dict}}
@@ -91,6 +91,7 @@ class MonitorCog(commands.Cog):
         self._hr_clear_date = None   # date string for which we've done the 6am clear
 
         self._load_hr_state()
+        self._load_nh_state()
         self.monitor_loop.start()
 
     def cog_unload(self):
@@ -114,6 +115,35 @@ class MonitorCog(commands.Cog):
                 json.dump(list(self._hr_posted), f)
         except Exception as e:
             print(f"[monitor] failed to save HR state: {e}")
+
+    def _load_nh_state(self) -> None:
+        try:
+            with open(NH_STATE_FILE) as f:
+                data = json.load(f)
+            # alert_key is stored as a list [inning, half] — restore as tuple
+            self._nh_alerted = {
+                int(pk): {**v, "key": tuple(v["key"])}
+                for pk, v in data.get("nh_alerted", {}).items()
+            }
+            self._nh_broken_posted = set(int(pk) for pk in data.get("nh_broken_posted", []))
+            print(f"[monitor] loaded NH state: {len(self._nh_alerted)} active, {len(self._nh_broken_posted)} broken")
+        except (FileNotFoundError, json.JSONDecodeError):
+            self._nh_alerted = {}
+            self._nh_broken_posted = set()
+
+    def _save_nh_state(self) -> None:
+        try:
+            data = {
+                "nh_alerted": {
+                    str(pk): {**v, "key": list(v["key"])}
+                    for pk, v in self._nh_alerted.items()
+                },
+                "nh_broken_posted": list(self._nh_broken_posted),
+            }
+            with open(NH_STATE_FILE, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"[monitor] failed to save NH state: {e}")
 
     async def _refresh_schedule(self, prune_finished: bool = False) -> None:
         """Fetch today's full MLB schedule and MERGE into the existing game cache.
@@ -176,6 +206,7 @@ class MonitorCog(commands.Cog):
                 # HR state intentionally kept — _hr_posted is a set and harmless;
                 # _hr_pending entries expire naturally via VIDEO_WAIT_MAX_CYCLES.
             if finished_pks:
+                self._save_nh_state()
                 print(f"[monitor] pruned {len(finished_pks)} finished game(s) from tracker")
 
         # Merge today's games in (add new ones, update metadata for existing ones)
@@ -505,14 +536,21 @@ class MonitorCog(commands.Cog):
             if stored is None or stored["key"] != alert_key:
                 asyncio.create_task(self._delayed_nh_alert(channel, feed, game_pk))
                 self._nh_alerted[game_pk] = {"key": alert_key, "perfect": is_pg, "pitching_abbr": nh_pitching}
+                self._save_nh_state()
         else:
             # Flag was cleared — post break-up alert if we were tracking this game
+            nh_changed = False
             if game_pk in self._nh_alerted and game_pk not in self._nh_broken_posted:
                 was_perfect   = self._nh_alerted[game_pk].get("perfect", False)
                 pitching_abbr = self._nh_alerted[game_pk].get("pitching_abbr")
                 self._nh_broken_posted.add(game_pk)
                 asyncio.create_task(self._delayed_nh_broken_alert(channel, feed, was_perfect, pitching_abbr))
-            self._nh_alerted.pop(game_pk, None)
+                nh_changed = True
+            if game_pk in self._nh_alerted:
+                self._nh_alerted.pop(game_pk)
+                nh_changed = True
+            if nh_changed:
+                self._save_nh_state()
 
         # ── Home runs ≥ threshold ────────────────────────────────────────────
         all_plays = live_data.get("plays", {}).get("allPlays", [])
