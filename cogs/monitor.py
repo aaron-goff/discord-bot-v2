@@ -349,6 +349,7 @@ class MonitorCog(commands.Cog):
         about   = hit_play.get("about", {})
         inning  = about.get("inning", 0)
         is_top  = about.get("halfInning", "top") == "top"
+        outs    = about.get("outs", 0)
         desc    = hit_play.get("result", {}).get("description", "")
         pitcher = hit_play.get("matchup", {}).get("pitcher", {}).get("fullName", "")
         batter  = hit_play.get("matchup", {}).get("batter",  {}).get("fullName", "")
@@ -370,8 +371,9 @@ class MonitorCog(commands.Cog):
             play_text = desc
 
         embed = discord.Embed(title=title, color=discord.Color.blue())
-        embed.add_field(name="Score",  value=score_line,                    inline=True)
-        embed.add_field(name="Inning", value=_inning_label(inning, is_top), inline=True)
+        inning_desc = _inning_label(inning, is_top) + f" | {outs} out{'s' if outs != 1 else ''}"
+        embed.add_field(name="Score",  value=score_line,  inline=True)
+        embed.add_field(name="Inning", value=inning_desc, inline=True)
         if play_text:
             embed.add_field(name="Play", value=play_text, inline=False)
 
