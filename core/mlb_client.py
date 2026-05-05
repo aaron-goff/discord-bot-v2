@@ -954,6 +954,54 @@ class BoxScoreData:
         return output.strip()
 
 @dataclass
+class PlayerGameLogData:
+    player_id: str
+    player_name: str
+    team_abbrev: str
+    headshot_url: str
+    position_type: str  # 'hitting' or 'pitching'
+    rows: List[dict]
+
+    def _format_table(self, labels: List[str], rows: List[dict], repl: dict, left_cols: set) -> str:
+        if not rows:
+            return "No data available."
+        widths = {}
+        for label in labels:
+            widths[label] = len(repl.get(label, label.upper()))
+            for row in rows:
+                widths[label] = max(widths[label], len(str(row.get(label, ''))))
+        header = ''
+        for label in labels:
+            display = repl.get(label, label.upper())
+            if label in left_cols:
+                header += display.ljust(widths[label]) + ' '
+            else:
+                header += display.rjust(widths[label]) + ' '
+        lines = [header.rstrip()]
+        for row in rows:
+            line = ''
+            for label in labels:
+                val = str(row.get(label, ''))
+                if label in left_cols:
+                    line += val.ljust(widths[label]) + ' '
+                else:
+                    line += val.rjust(widths[label]) + ' '
+            lines.append(line.rstrip())
+        return '\n'.join(lines)
+
+    def format_log(self) -> str:
+        if self.position_type == 'pitching':
+            labels = ['date', 'opp', 'ip', 'h', 'r', 'er', 'bb', 'so', 'hr', 'p', 's', 'dec']
+            repl = {'date': 'DATE', 'opp': 'OPP', 'ip': 'IP', 'h': 'H', 'r': 'R', 'er': 'ER', 'bb': 'BB', 'so': 'SO', 'hr': 'HR', 'p': 'P', 's': 'S', 'dec': 'DEC'}
+            left_cols = {'date', 'opp', 'dec'}
+        else:
+            labels = ['date', 'opp', 'ab', 'r', 'h', '2b', '3b', 'hr', 'rbi', 'bb', 'so', 'lob', 'avg', 'obp', 'slg', 'ops']
+            repl = {'date': 'DATE', 'opp': 'OPP', 'ab': 'AB', 'r': 'R', 'h': 'H', '2b': '2B', '3b': '3B', 'hr': 'HR', 'rbi': 'RBI', 'bb': 'BB', 'so': 'SO', 'lob': 'LOB', 'avg': 'AVG', 'obp': 'OBP', 'slg': 'SLG', 'ops': 'OPS'}
+            left_cols = {'date', 'opp'}
+        return self._format_table(labels, self.rows, repl, left_cols)
+
+
+@dataclass
 class BullpenData:
     team_name: str
     past_dates: List[str]
@@ -1953,6 +2001,114 @@ class MLBClient:
                 ))
 
         return results
+
+    async def get_player_game_log(self, player: str, n: int = 5) -> Optional[PlayerGameLogData]:
+        session = await self.get_session()
+        resolved = await self.resolve_player(player)
+        if not resolved:
+            return None
+        player_id = resolved['id']
+        player_name = resolved['name']
+        headshot_url = f"https://securea.mlb.com/mlb/images/players/head_shot/{player_id}@3x.jpg"
+
+        # Fetch person info and teams list concurrently
+        person_url = f"{self.BASE_URL}/people/{player_id}?hydrate=currentTeam"
+        teams_url = f"{self.BASE_URL}/teams?sportId=1"
+        async with session.get(person_url) as resp:
+            person_data = await resp.json()
+        async with session.get(teams_url) as resp:
+            teams_data = await resp.json()
+
+        person = person_data.get('people', [{}])[0]
+        pos_code = person.get('primaryPosition', {}).get('code', '')
+        player_name = person.get('fullName', player_name)
+
+        # Build team ID → abbreviation lookup
+        team_abbrev_map = {t['id']: t['abbreviation'] for t in teams_data.get('teams', []) if 'id' in t and 'abbreviation' in t}
+
+        current_team_id = person.get('currentTeam', {}).get('id')
+        team_abbrev = team_abbrev_map.get(current_team_id, '??') if current_team_id else '??'
+
+        season = str(datetime.now().year)
+        hitting_splits = []
+        pitching_splits = []
+        for grp, target in [('hitting', hitting_splits), ('pitching', pitching_splits)]:
+            url = f"{self.BASE_URL}/people/{player_id}/stats?stats=gameLog&season={season}&group={grp}"
+            async with session.get(url) as resp:
+                data = await resp.json()
+            for stat_block in data.get('stats', []):
+                target.extend(stat_block.get('splits', []))
+
+        # pos_code '1' = pitcher; 'TWP' = two-way
+        if pos_code == '1':
+            position_type = 'pitching'
+            splits = pitching_splits if pitching_splits else hitting_splits
+        else:
+            position_type = 'hitting'
+            splits = hitting_splits if hitting_splits else pitching_splits
+
+        if not splits:
+            return None
+
+        # Sort by date ascending (API usually is, but ensure it)
+        splits.sort(key=lambda s: s.get('date', ''))
+
+        recent = splits[-n:][::-1]  # newest first
+
+        rows = []
+        for split in recent:
+            date_str = split.get('date', '')
+            try:
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                date_fmt = f"{dt.month}-{dt.day}"
+            except Exception:
+                date_fmt = date_str
+            opp_id = split.get('opponent', {}).get('id')
+            opp = team_abbrev_map.get(opp_id, '?') if opp_id else '?'
+            stat = split.get('stat', {})
+            if position_type == 'hitting':
+                rows.append({
+                    'date': date_fmt,
+                    'opp': opp,
+                    'ab': str(stat.get('atBats', 0)),
+                    'r': str(stat.get('runs', 0)),
+                    'h': str(stat.get('hits', 0)),
+                    '2b': str(stat.get('doubles', 0)),
+                    '3b': str(stat.get('triples', 0)),
+                    'hr': str(stat.get('homeRuns', 0)),
+                    'rbi': str(stat.get('rbi', 0)),
+                    'bb': str(stat.get('baseOnBalls', 0)),
+                    'so': str(stat.get('strikeOuts', 0)),
+                    'lob': str(stat.get('leftOnBase', 0)),
+                    'avg': stat.get('avg', '.000'),
+                    'obp': stat.get('obp', '.000'),
+                    'slg': stat.get('slg', '.000'),
+                    'ops': stat.get('ops', '.000'),
+                })
+            else:
+                rows.append({
+                    'date': date_fmt,
+                    'opp': opp,
+                    'ip': str(stat.get('inningsPitched', '0')),
+                    'h': str(stat.get('hits', 0)),
+                    'r': str(stat.get('runs', 0)),
+                    'er': str(stat.get('earnedRuns', 0)),
+                    'bb': str(stat.get('baseOnBalls', 0)),
+                    'so': str(stat.get('strikeOuts', 0)),
+                    'hr': str(stat.get('homeRuns', 0)),
+                    'p': str(stat.get('numberOfPitches', 0)),
+                    's': str(stat.get('strikes', 0)),
+                    'dec': stat.get('note', ''),
+                })
+
+        return PlayerGameLogData(
+            player_id=player_id,
+            player_name=player_name,
+            team_abbrev=team_abbrev,
+            headshot_url=headshot_url,
+            position_type=position_type,
+            rows=rows,
+        )
 
     async def get_player_splits(self, player_id_or_name: str, sit_code: str, year: str = None, stat_type: str = None) -> List[PlayerSeasonStats]:
         session = await self.get_session()

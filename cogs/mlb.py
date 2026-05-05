@@ -388,6 +388,24 @@ class MLBSlash(commands.Cog):
         embed.description += f"\n```python\n{pace_data.format_discord_code_block()}\n```"
         await interaction.followup.send(embed=embed)
 
+    @mlb.command(name="log", description="Get a player's last N games stat log")
+    @app_commands.describe(player="The player to search for", games="Number of games to show (default: 5)")
+    @app_commands.autocomplete(player=player_autocomplete)
+    async def log(self, interaction: discord.Interaction, player: str, games: int = 5):
+        await interaction.response.defer()
+        log_data = await self.bot.mlb_client.get_player_game_log(player, n=games)
+
+        if not log_data:
+            await interaction.followup.send("Could not find stats for that player.")
+            return
+
+        embed = discord.Embed(
+            title=f"Last {len(log_data.rows)} Games — {log_data.player_name} ({log_data.team_abbrev})",
+            description=f"```\n{log_data.format_log()}\n```",
+            color=discord.Color.blue(),
+        )
+        await interaction.followup.send(embed=embed)
+
     @mlb.command(name="transactions", description="Get a player's transactions for a season")
     @app_commands.describe(player="The player to search for", year="Season year (e.g. 2024). Defaults to current year.")
     @app_commands.autocomplete(player=player_autocomplete)

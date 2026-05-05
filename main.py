@@ -1,3 +1,4 @@
+import asyncio
 import os
 import discord
 from discord.ext import commands
@@ -21,9 +22,14 @@ class ModernNatsBot(commands.Bot):
         # Load the live game monitor (no-hitters, big HRs)
         await self.load_extension('cogs.monitor')
         
-        # Sync the slash commands to Discord
-        await self.tree.sync()
-        print("Slash commands synced globally!")
+        # Sync slash commands in the background so startup isn't blocked
+        async def _sync():
+            try:
+                synced = await self.tree.sync()
+                print(f"Slash commands synced globally! ({len(synced)} commands)")
+            except Exception as e:
+                print(f"Command sync error: {e}")
+        asyncio.create_task(_sync())
         
     async def close(self):
         # Cleanly close the aiohttp session when the bot shuts down
