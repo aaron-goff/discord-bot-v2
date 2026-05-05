@@ -389,11 +389,12 @@ class MLBSlash(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @mlb.command(name="log", description="Get a player's last N games stat log")
-    @app_commands.describe(player="The player to search for", games="Number of games to show (default: 5)")
+    @app_commands.describe(player="The player to search for", games="Number of games to show (default: 5)", date="Show N games on or before this date (e.g. 4/7/26, yesterday)")
     @app_commands.autocomplete(player=player_autocomplete)
-    async def log(self, interaction: discord.Interaction, player: str, games: int = 5):
+    async def log(self, interaction: discord.Interaction, player: str, games: int = 5, date: str = None):
         await interaction.response.defer()
-        log_data = await self.bot.mlb_client.get_player_game_log(player, n=games)
+        parsed_date = parse_date(date) if date else None
+        log_data = await self.bot.mlb_client.get_player_game_log(player, n=games, before_date=parsed_date)
 
         if not log_data:
             await interaction.followup.send("Could not find stats for that player.")

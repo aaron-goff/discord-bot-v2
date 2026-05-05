@@ -2002,7 +2002,7 @@ class MLBClient:
 
         return results
 
-    async def get_player_game_log(self, player: str, n: int = 5) -> Optional[PlayerGameLogData]:
+    async def get_player_game_log(self, player: str, n: int = 5, before_date: str = None) -> Optional[PlayerGameLogData]:
         session = await self.get_session()
         resolved = await self.resolve_player(player)
         if not resolved:
@@ -2053,6 +2053,9 @@ class MLBClient:
         # Sort by date ascending (API usually is, but ensure it)
         splits.sort(key=lambda s: s.get('date', ''))
 
+        if before_date:
+            splits = [s for s in splits if s.get('date', '') <= before_date]
+
         recent = splits[-n:][::-1]  # newest first
 
         rows = []
@@ -2098,7 +2101,7 @@ class MLBClient:
                     'hr': str(stat.get('homeRuns', 0)),
                     'p': str(stat.get('numberOfPitches', 0)),
                     's': str(stat.get('strikes', 0)),
-                    'dec': stat.get('note', ''),
+                    'dec': 'W' if stat.get('wins') else 'L' if stat.get('losses') else 'S' if stat.get('saves') else '',
                 })
 
         return PlayerGameLogData(
