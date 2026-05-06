@@ -1322,6 +1322,28 @@ class MLBSlash(commands.Cog):
     async def milb_abs_player_autocomplete(self, interaction: discord.Interaction, current: str):
         return await self.milb_stats_player_autocomplete(interaction, current)
 
+    @milb.command(name="log", description="Get a minor league player's last N games stat log")
+    @app_commands.describe(player="The minor league player to search for", games="Number of games to show (default: 5)", date="Show N games on or before this date (e.g. 4/7/26, yesterday)")
+    async def milb_log(self, interaction: discord.Interaction, player: str, games: int = 5, date: str = None):
+        await interaction.response.defer()
+        parsed_date = parse_date(date) if date else None
+        log_data = await self.bot.mlb_client.get_player_game_log(player, n=games, before_date=parsed_date, milb=True)
+
+        if not log_data:
+            await interaction.followup.send("Could not find stats for that player.")
+            return
+
+        embed = discord.Embed(
+            title=f"Last {len(log_data.rows)} Games — {log_data.player_name} ({log_data.team_abbrev})",
+            description=f"```\n{log_data.format_log()}\n```",
+            color=discord.Color.blue(),
+        )
+        await interaction.followup.send(embed=embed)
+
+    @milb_log.autocomplete('player')
+    async def milb_log_player_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await self.milb_stats_player_autocomplete(interaction, current)
+
     @milb.command(name="box", description="Get the box score for a MiLB team's game")
     @app_commands.describe(team="Team name or affiliate abbreviation (e.g. wsh, wilmington, blue rocks)", date="A specific date (e.g. 4/7/26, yesterday). Leave blank for today.")
     @app_commands.describe(part="Which part of the box score to show")
