@@ -1555,9 +1555,15 @@ class MLBSlash(commands.Cog):
 
 
         if edit_original:
-            await interaction.edit_original_response(embeds=embeds, view=view)
+            kwargs = {"embeds": embeds}
+            if view is not None:
+                kwargs["view"] = view
+            await interaction.edit_original_response(**kwargs)
         else:
-            await interaction.followup.send(embeds=embeds, view=view)
+            kwargs = {"embeds": embeds}
+            if view is not None:
+                kwargs["view"] = view
+            await interaction.followup.send(**kwargs)
 
 
 
