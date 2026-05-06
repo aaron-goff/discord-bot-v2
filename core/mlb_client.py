@@ -1934,11 +1934,11 @@ class MLBClient:
 
         return results
 
-    async def get_player_last_games(self, player_id_or_name: str, num_games: int = 10, stat_type: str = None) -> List[PlayerSeasonStats]:
+    async def get_player_last_games(self, player_id_or_name: str, num_games: int = 10, stat_type: str = None, milb: bool = False) -> List[PlayerSeasonStats]:
         """Fetch a player's aggregated stats over their last N games using the lastXGames stat type."""
         session = await self.get_session()
 
-        resolved = await self.resolve_player(player_id_or_name)
+        resolved = await self.resolve_player(player_id_or_name, milb=milb)
         if not resolved:
             return []
         player_id = resolved['id']
@@ -1946,9 +1946,10 @@ class MLBClient:
 
         headshot_url = f"https://securea.mlb.com/mlb/images/players/head_shot/{player_id}@3x.jpg"
 
+        league_list_id = "milb_all" if milb else "mlb_hist"
         person_url = (
             f"{self.BASE_URL}/people/{player_id}?hydrate=currentTeam,team,"
-            f"stats(type=[lastXGames](team(league)),leagueListId=mlb_hist,limit={num_games},group=[hitting,pitching])"
+            f"stats(type=[lastXGames](team(league)),leagueListId={league_list_id},limit={num_games},group=[hitting,pitching])"
         )
         async with session.get(person_url) as resp:
             person_data = await resp.json()

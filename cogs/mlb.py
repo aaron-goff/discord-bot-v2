@@ -1344,6 +1344,49 @@ class MLBSlash(commands.Cog):
     async def milb_log_player_autocomplete(self, interaction: discord.Interaction, current: str):
         return await self.milb_stats_player_autocomplete(interaction, current)
 
+    @milb.command(name="last", description="Get a minor league player's aggregated stats over their last N games")
+    @app_commands.describe(player="The minor league player to search for")
+    @app_commands.describe(games="Number of recent games to aggregate (default 10, max 50)")
+    @app_commands.describe(stat_type="Hitting or Pitching. Leave blank for default.")
+    @app_commands.choices(stat_type=[
+        app_commands.Choice(name="Hitting", value="hitting"),
+        app_commands.Choice(name="Pitching", value="pitching")
+    ])
+    async def milb_last(self, interaction: discord.Interaction, player: str, games: int = 10, stat_type: app_commands.Choice[str] = None):
+        await interaction.response.defer()
+        num_games = max(1, min(50, games))
+        s_type = stat_type.value if stat_type else None
+
+        stats_list = await self.bot.mlb_client.get_player_last_games(player, num_games=num_games, stat_type=s_type, milb=True)
+
+        if not stats_list:
+            await interaction.followup.send("Could not find stats for that player.")
+            return
+
+        embed = discord.Embed(color=discord.Color.blue())
+
+        first_stats = stats_list[0]
+        if len(stats_list) > 1:
+            embed.title = f"Last {num_games} Games for {first_stats.player_name} ({first_stats.team_abbrev})"
+        else:
+            embed.title = f"Last {num_games} Games {first_stats.stat_type.capitalize()} for {first_stats.player_name} ({first_stats.team_abbrev})"
+
+        description = f"{first_stats.info_line}\n\n"
+        for st in stats_list:
+            if len(stats_list) > 1:
+                description += f"*{st.stat_type.capitalize()}*\n"
+            description += f"```python\n{st.format_discord_code_block()}\n```\n"
+
+        embed.description = description.strip()
+        if first_stats.headshot_url:
+            embed.set_thumbnail(url=first_stats.headshot_url)
+
+        await interaction.followup.send(embed=embed)
+
+    @milb_last.autocomplete('player')
+    async def milb_last_player_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await self.milb_stats_player_autocomplete(interaction, current)
+
     @milb.command(name="box", description="Get the box score for a MiLB team's game")
     @app_commands.describe(team="Team name or affiliate abbreviation (e.g. wsh, wilmington, blue rocks)", date="A specific date (e.g. 4/7/26, yesterday). Leave blank for today.")
     @app_commands.describe(part="Which part of the box score to show")
