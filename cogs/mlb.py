@@ -1460,18 +1460,34 @@ class MLBSlash(commands.Cog):
     @milb_score.autocomplete('team')
     async def milb_score_team_autocomplete(self, interaction: discord.Interaction, current: str):
         session = await self.bot.mlb_client.get_session()
-        choices = []
         query = current.lower().strip()
+
+        # Pinned entries: WSH org + 4 Nationals affiliates always at top when query is empty
+        PINNED = [
+            app_commands.Choice(name="WSH — Nationals (All Affiliates)", value="WSH"),
+            app_commands.Choice(name="ROC — Rochester Red Wings (Triple-A)", value="ROC"),
+            app_commands.Choice(name="HBG — Harrisburg Senators (Double-A)", value="HBG"),
+            app_commands.Choice(name="WIL — Wilmington Blue Rocks (High-A)", value="WIL"),
+            app_commands.Choice(name="FBG — Fredericksburg Nationals (Single-A)", value="FBG"),
+        ]
+        PINNED_VALUES = {c.value for c in PINNED}
+
+        if not query:
+            choices = list(PINNED)
+        else:
+            choices = [c for c in PINNED if query in c.name.lower()]
 
         async with session.get(f"{self.bot.mlb_client.BASE_URL}/teams?sportId=1") as resp:
             mlb_data = await resp.json()
         for t in mlb_data.get('teams', []):
             abbrev = t.get('abbreviation', '')
+            if abbrev in PINNED_VALUES:
+                continue
             name = t.get('name', '')
             team_name = t.get('teamName', name)
             if not query or query in abbrev.lower() or query in name.lower():
                 choices.append(app_commands.Choice(name=f"{abbrev} — {team_name} (All Affiliates)", value=abbrev))
-            if len(choices) >= 10:
+            if len(choices) >= 15:
                 break
 
         if len(choices) < 25:
@@ -1480,6 +1496,8 @@ class MLBSlash(commands.Cog):
                 milb_data = await resp.json()
             for t in milb_data.get('teams', []):
                 abbrev = t.get('abbreviation', '')
+                if abbrev in PINNED_VALUES:
+                    continue
                 name = t.get('name', '')
                 sport = t.get('sport', {}).get('name', '')
                 if not query or query in abbrev.lower() or query in name.lower():
