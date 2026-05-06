@@ -1598,15 +1598,17 @@ class MLBClient:
                 
                 try:
                     async with session.get(pbp_url) as resp:
-                        pbp_data = await resp.json() if resp.status == 200 else {}
+                        pbp_data = (await resp.json() if resp.status == 200 else {}) or {}
                     async with session.get(content_url) as resp:
-                        content_data = await resp.json() if resp.status == 200 else {}
+                        content_data = (await resp.json() if resp.status == 200 else {}) or {}
                 except Exception as e:
                     print(f"Error fetching AB data: {e}")
                     pbp_data, content_data = {}, {}
                     
                 content_dict = {}
-                highlights = content_data.get('highlights', {}).get('highlights', {}).get('items', [])
+                if not isinstance(content_data, dict):
+                    content_data = {}
+                highlights = ((content_data.get('highlights') or {}).get('highlights') or {}).get('items', [])
                 for item in highlights:
                     if 'guid' in item:
                         for pb in item.get('playbacks', []):
