@@ -2031,9 +2031,9 @@ class MLBClient:
 
         return results
 
-    async def get_player_game_log(self, player: str, n: int = 5, before_date: str = None) -> Optional[PlayerGameLogData]:
+    async def get_player_game_log(self, player: str, n: int = 5, before_date: str = None, milb: bool = False) -> Optional[PlayerGameLogData]:
         session = await self.get_session()
-        resolved = await self.resolve_player(player)
+        resolved = await self.resolve_player(player, milb=milb)
         if not resolved:
             return None
         player_id = resolved['id']
@@ -2042,7 +2042,8 @@ class MLBClient:
 
         # Fetch person info and teams list concurrently
         person_url = f"{self.BASE_URL}/people/{player_id}?hydrate=currentTeam"
-        teams_url = f"{self.BASE_URL}/teams?sportId=1"
+        teams_sport_ids = "11,12,13,14,15" if milb else "1"
+        teams_url = f"{self.BASE_URL}/teams?sportIds={teams_sport_ids}" if milb else f"{self.BASE_URL}/teams?sportId=1"
         async with session.get(person_url) as resp:
             person_data = await resp.json()
         async with session.get(teams_url) as resp:
@@ -2061,8 +2062,9 @@ class MLBClient:
         season = str(datetime.now().year)
         hitting_splits = []
         pitching_splits = []
+        milb_suffix = "&leagueListId=milb_all" if milb else ""
         for grp, target in [('hitting', hitting_splits), ('pitching', pitching_splits)]:
-            url = f"{self.BASE_URL}/people/{player_id}/stats?stats=gameLog&season={season}&group={grp}"
+            url = f"{self.BASE_URL}/people/{player_id}/stats?stats=gameLog&season={season}&group={grp}{milb_suffix}"
             async with session.get(url) as resp:
                 data = await resp.json()
             for stat_block in data.get('stats', []):
