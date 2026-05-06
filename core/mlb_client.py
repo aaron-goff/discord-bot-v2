@@ -1992,16 +1992,20 @@ class MLBClient:
                 async with session.get(url) as resp:
                     data = await resp.json()
                 found_stats = []
+                effective_team = team_abbrev
                 for stat_block in data.get('stats', []):
                     splits = stat_block.get('splits', [])
                     if splits:
                         s = splits[-1].get('stat', {})
-                        s['team'] = splits[-1].get('team', {}).get('abbreviation', team_abbrev)
+                        split_abbrev = splits[-1].get('team', {}).get('abbreviation', '')
+                        if split_abbrev:
+                            effective_team = split_abbrev
+                        s['team'] = split_abbrev or team_abbrev
                         found_stats.append(s)
                 if found_stats:
                     results.append(PlayerSeasonStats(
                         player_name=player_name,
-                        team_abbrev=team_abbrev,
+                        team_abbrev=effective_team,
                         stat_type=st,
                         years=label,
                         is_career=False,
