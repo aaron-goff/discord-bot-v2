@@ -1934,11 +1934,11 @@ class MLBClient:
 
         return results
 
-    async def get_player_last_games(self, player_id_or_name: str, num_games: int = 10, stat_type: str = None) -> List[PlayerSeasonStats]:
-        """Fetch a player's aggregated stats over their last N games using the lastXGames stat type."""
+    async def get_player_last_games(self, player_id_or_name: str, num_games: int = 10, stat_type: str = None, milb: bool = False, days: int = None) -> List[PlayerSeasonStats]:
+        """Fetch a player's aggregated stats over their last N games (or last N days) using lastXGames or byDateRange."""
         session = await self.get_session()
 
-        resolved = await self.resolve_player(player_id_or_name)
+        resolved = await self.resolve_player(player_id_or_name, milb=milb)
         if not resolved:
             return []
         player_id = resolved['id']
@@ -1946,9 +1946,88 @@ class MLBClient:
 
         headshot_url = f"https://securea.mlb.com/mlb/images/players/head_shot/{player_id}@3x.jpg"
 
+        if days is not None:
+            # byDateRange: fetch person info and stats separately
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=days)
+            end_date = end_dt.strftime('%Y-%m-%d')
+            start_date = start_dt.strftime('%Y-%m-%d')
+            label = f"Last {days} Days"
+
+            person_url = f"{self.BASE_URL}/people/{player_id}?hydrate=currentTeam"
+            async with session.get(person_url) as resp:
+                person_data = await resp.json()
+            if not person_data.get('people'):
+                return []
+            person = person_data['people'][0]
+            player_name = person.get('fullName', player_name)
+            pos = person.get('primaryPosition', {}).get('abbreviation', '')
+            team_abbrev = person.get('currentTeam', {}).get('abbreviation', 'FA')
+
+            birthdate = person.get('birthDate', '1900-01-01')[:10]
+            try:
+                b_dt = datetime.strptime(birthdate, "%Y-%m-%d")
+                now = datetime.now()
+                age = now.year - b_dt.year - ((now.month, now.day) < (b_dt.month, b_dt.day))
+                age_str = f"Age: {age}"
+            except:
+                age_str = ""
+            info_line = f"{pos}  |  B/T: {person.get('batSide', {}).get('code', '')}/{person.get('pitchHand', {}).get('code', '')}  |  {person.get('height', '')}  |  {person.get('weight', '')} lbs  |  {age_str}"
+            if person.get('nickName'):
+                info_line += f"  |  \"{person['nickName']}\""
+
+            if not stat_type:
+                if pos == "TWP":
+                    stat_types_to_fetch = ["hitting", "pitching"]
+                else:
+                    stat_types_to_fetch = ["pitching"] if pos == "P" else ["hitting"]
+            else:
+                stat_types_to_fetch = [stat_type]
+
+            milb_suffix = "&leagueListId=milb_all" if milb else ""
+            results = []
+            for st in stat_types_to_fetch:
+                url = (f"{self.BASE_URL}/people/{player_id}/stats"
+                       f"?stats=byDateRange&startDate={start_date}&endDate={end_date}&group={st}{milb_suffix}")
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                found_stats = []
+                for stat_block in data.get('stats', []):
+                    splits = stat_block.get('splits', [])
+                    if splits:
+                        s = splits[-1].get('stat', {})
+                        s['team'] = splits[-1].get('team', {}).get('abbreviation', team_abbrev)
+                        found_stats.append(s)
+                if found_stats:
+                    results.append(PlayerSeasonStats(
+                        player_name=player_name,
+                        team_abbrev=team_abbrev,
+                        stat_type=st,
+                        years=label,
+                        is_career=False,
+                        info_line=info_line,
+                        stats=found_stats,
+                        headshot_url=headshot_url,
+                    ))
+                elif stat_type or len(stat_types_to_fetch) == 1:
+                    results.append(PlayerSeasonStats(
+                        player_name=player_name,
+                        team_abbrev=team_abbrev,
+                        stat_type=st,
+                        years=label,
+                        is_career=False,
+                        info_line=info_line,
+                        stats=[],
+                        info_message=f"No {st} stats found for this player in the last {days} days.",
+                        headshot_url=headshot_url,
+                    ))
+            return results
+
+        # lastXGames via person hydrate
+        league_list_id = "milb_all" if milb else "mlb_hist"
         person_url = (
             f"{self.BASE_URL}/people/{player_id}?hydrate=currentTeam,team,"
-            f"stats(type=[lastXGames](team(league)),leagueListId=mlb_hist,limit={num_games},group=[hitting,pitching])"
+            f"stats(type=[lastXGames](team(league)),leagueListId={league_list_id},limit={num_games},group=[hitting,pitching])"
         )
         async with session.get(person_url) as resp:
             person_data = await resp.json()
