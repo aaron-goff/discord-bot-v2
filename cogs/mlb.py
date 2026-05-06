@@ -1322,6 +1322,75 @@ class MLBSlash(commands.Cog):
     async def milb_abs_player_autocomplete(self, interaction: discord.Interaction, current: str):
         return await self.milb_stats_player_autocomplete(interaction, current)
 
+    @milb.command(name="box", description="Get the box score for a MiLB team's game")
+    @app_commands.describe(team="Team name or affiliate abbreviation (e.g. wsh, wilmington, blue rocks)", date="A specific date (e.g. 4/7/26, yesterday). Leave blank for today.")
+    @app_commands.describe(part="Which part of the box score to show")
+    @app_commands.choices(part=[
+        app_commands.Choice(name="All", value="all"),
+        app_commands.Choice(name="Batting", value="batting"),
+        app_commands.Choice(name="Pitching", value="pitching"),
+        app_commands.Choice(name="Notes and Info", value="notes_info"),
+    ])
+    async def milb_box(self, interaction: discord.Interaction, team: str, date: str = None, part: app_commands.Choice[str] = None):
+        await interaction.response.defer()
+        parsed_date = parse_date(date)
+        team_id = int(team) if team.isdigit() else None
+        if not team_id:
+            await interaction.followup.send("Could not find that team. Use the autocomplete to select a team.")
+            return
+
+        box = await self.bot.mlb_client.get_milb_box_score(team_id, date=parsed_date)
+        if not box:
+            await interaction.followup.send("Could not find a game for that team/date.")
+            return
+
+        embed = discord.Embed(title=box.title, color=discord.Color.blue())
+        show_part = part.value if part else "batting"
+
+        desc = ""
+        if show_part in ["all", "batting"]:
+            desc += f"**{box.team_name} Batting**\n```python\n{box.format_batting()}\n```\n"
+        if show_part in ["all", "pitching"]:
+            desc += f"**{box.team_name} Pitching**\n```python\n{box.format_pitching()}\n```\n"
+        if show_part == "notes_info":
+            desc += "No batting/pitching stats requested."
+
+        if len(desc) > 4096:
+            embed.description = desc[:4093] + "..."
+        else:
+            embed.description = desc.strip()
+
+        if show_part in ["all", "notes_info"]:
+            notes = box.format_notes()
+            if notes:
+                embed.add_field(name="Notes", value=notes[:1024], inline=False)
+            info = box.format_game_info()
+            if info:
+                embed.add_field(name="Game Info", value=info[:1024], inline=False)
+
+        if box.game_date:
+            embed.set_footer(text=box.game_date)
+
+        await interaction.followup.send(embed=embed)
+
+    @milb_box.autocomplete('team')
+    async def milb_box_team_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        if not current or len(current) < 2:
+            return []
+        teams = await self.bot.mlb_client.get_milb_teams()
+        q = current.lower()
+        matches = []
+        for t in teams:
+            name_lower = t['name'].lower()
+            abbrev_lower = t['abbreviation'].lower()
+            parent_name_lower = t['parent_name'].lower()
+            parent_abbrev_lower = t['parent_abbrev'].lower()
+            if (q in name_lower or q in abbrev_lower or
+                    q in parent_name_lower or q in parent_abbrev_lower):
+                label = f"{t['name']} ({t['parent_abbrev']} - {t['level']})"
+                matches.append(app_commands.Choice(name=label[:100], value=str(t['id'])))
+        return matches[:25]
+
     async def _send_player_abs(self, interaction: discord.Interaction, player: str, date: str, milb: bool, edit_original: bool = False):
         if edit_original:
             await interaction.response.defer()
@@ -1730,6 +1799,9 @@ class MLBSlash(commands.Cog):
                 embed.add_field(name="Notes & Info", value=notes, inline=False)
             elif not notes and show_part == "notes_info":
                 embed.description = "No Notes or Game Info available."
+
+        if box.game_date:
+            embed.set_footer(text=box.game_date)
 
         await interaction.followup.send(embed=embed)
 

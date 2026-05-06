@@ -869,6 +869,7 @@ class BoxScoreData:
     abs_info: List[dict] = None
     game_status: str = ""
     game_abstract_state: str = ""
+    game_date: str = ""
 
     def _format_table(self, labels: List[str], rows: List[dict], repl: dict, left_cols: set) -> str:
         """Generic fixed-width table formatter."""
@@ -1122,6 +1123,7 @@ class MLBClient:
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
         self._team_abbrevs: Optional[dict] = None
+        self._milb_teams_cache: Optional[list] = None
 
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -1146,6 +1148,31 @@ class MLBClient:
             self._team_abbrevs = mapping
         return self._team_abbrevs
 
+
+    async def get_milb_teams(self) -> list:
+        if self._milb_teams_cache:
+            return self._milb_teams_cache
+        session = await self.get_session()
+        season = str(datetime.now().year)
+        async with session.get(f"{self.BASE_URL}/teams?sportIds=11,12,13,14,15&season={season}") as resp:
+            milb_data = await resp.json()
+        async with session.get(f"{self.BASE_URL}/teams?sportId=1") as resp:
+            mlb_data = await resp.json()
+        mlb_abbrevs = {t['id']: t.get('abbreviation', '') for t in mlb_data.get('teams', [])}
+        result = []
+        for t in milb_data.get('teams', []):
+            parent_id = t.get('parentOrgId')
+            result.append({
+                'id': t['id'],
+                'name': t.get('name', ''),
+                'abbreviation': t.get('abbreviation', ''),
+                'level': t.get('sport', {}).get('name', ''),
+                'parent_id': parent_id,
+                'parent_name': t.get('parentOrgName', ''),
+                'parent_abbrev': mlb_abbrevs.get(parent_id, ''),
+            })
+        self._milb_teams_cache = result
+        return result
 
     async def close(self):
         """Closes the aiohttp session properly."""
@@ -2962,6 +2989,129 @@ class MLBClient:
             abs_info=abs_info,
             game_status=game.status,
             game_abstract_state=game.abstract_state,
+            game_date=game.game_date_str,
+        )
+
+    async def get_milb_box_score(self, team_id: int, date: str = None) -> Optional["BoxScoreData"]:
+        session = await self.get_session()
+        sched_url = f"{self.BASE_URL}/schedule?sportIds=11,12,13,14,15&teamId={team_id}"
+        if date:
+            sched_url += f"&date={date}"
+        async with session.get(sched_url) as resp:
+            sched_data = await resp.json()
+        dates = sched_data.get('dates', [])
+        if not dates or not dates[0].get('games'):
+            return None
+        game_data = dates[0]['games'][0]
+        game_pk = game_data['gamePk']
+        game_status = game_data.get('status', {}).get('detailedState', '')
+        game_abstract = game_data.get('status', {}).get('abstractGameState', '')
+        raw_date = dates[0].get('date', '')
+        try:
+            game_date = datetime.strptime(raw_date, '%Y-%m-%d').strftime('%A, %b %d').replace(' 0', ' ')
+        except Exception:
+            game_date = raw_date
+
+        home_team_id = game_data.get('teams', {}).get('home', {}).get('team', {}).get('id')
+        side = 'home' if home_team_id == team_id else 'away'
+
+        box_url = f"{self.BASE_URL}/game/{game_pk}/boxscore"
+        async with session.get(box_url) as resp:
+            box_data = await resp.json()
+
+        team_data = box_data.get('teams', {}).get(side, {})
+        players = team_data.get('players', {})
+        team_name = team_data.get('team', {}).get('name', '')
+        team_abbrev = team_data.get('team', {}).get('abbreviation', '')
+
+        batting_order = team_data.get('battingOrder', [])
+        all_batters = team_data.get('batters', [])
+        batting_rows = []
+        order_pos = 0
+
+        for batter_id in all_batters:
+            p_data = players.get(f'ID{batter_id}', {})
+            b_stats = p_data.get('stats', {}).get('batting', {})
+            if not b_stats and 'atBats' not in b_stats:
+                continue
+            season_stats = p_data.get('seasonStats', {}).get('batting', {})
+            name = p_data.get('person', {}).get('boxscoreName', 'Unknown')
+            positions = p_data.get('allPositions', [])
+            pos = "-".join(p.get('abbreviation', '') for p in positions) if positions else p_data.get('position', {}).get('abbreviation', '')
+            is_starter = batter_id in batting_order
+            if is_starter:
+                order_pos += 1
+                display_name = name
+            else:
+                display_name = " " + name
+            batting_rows.append({
+                'name': display_name, 'pos': pos,
+                'ab': str(b_stats.get('atBats', 0)), 'r': str(b_stats.get('runs', 0)),
+                'h': str(b_stats.get('hits', 0)), 'rbi': str(b_stats.get('rbi', 0)),
+                'bb': str(b_stats.get('baseOnBalls', 0)), 'so': str(b_stats.get('strikeOuts', 0)),
+                'lob': str(b_stats.get('leftOnBase', 0)),
+                'avg': season_stats.get('avg', '.000'), 'obp': season_stats.get('obp', '.000'),
+                'slg': season_stats.get('slg', '.000'), 'is_starter': is_starter,
+            })
+            if is_starter and order_pos >= 9:
+                remaining_idx = all_batters.index(batter_id) + 1
+                for rem_id in all_batters[remaining_idx:]:
+                    if rem_id in batting_order:
+                        break
+                    rem_data = players.get(f'ID{rem_id}', {})
+                    rem_stats = rem_data.get('stats', {}).get('batting', {})
+                    if not rem_stats:
+                        continue
+                    rem_season = rem_data.get('seasonStats', {}).get('batting', {})
+                    rem_name = rem_data.get('person', {}).get('boxscoreName', 'Unknown')
+                    rem_positions = rem_data.get('allPositions', [])
+                    rem_pos = "-".join(p.get('abbreviation', '') for p in rem_positions) if rem_positions else ''
+                    batting_rows.append({
+                        'name': " " + rem_name, 'pos': rem_pos,
+                        'ab': str(rem_stats.get('atBats', 0)), 'r': str(rem_stats.get('runs', 0)),
+                        'h': str(rem_stats.get('hits', 0)), 'rbi': str(rem_stats.get('rbi', 0)),
+                        'bb': str(rem_stats.get('baseOnBalls', 0)), 'so': str(rem_stats.get('strikeOuts', 0)),
+                        'lob': str(rem_stats.get('leftOnBase', 0)),
+                        'avg': rem_season.get('avg', '.000'), 'obp': rem_season.get('obp', '.000'),
+                        'slg': rem_season.get('slg', '.000'), 'is_starter': False,
+                    })
+                break
+
+        pitching_rows = []
+        for pitcher_id in team_data.get('pitchers', []):
+            p_data = players.get(f'ID{pitcher_id}', {})
+            p_stats = p_data.get('stats', {}).get('pitching', {})
+            if not p_stats:
+                continue
+            season_stats = p_data.get('seasonStats', {}).get('pitching', {})
+            name = p_data.get('person', {}).get('boxscoreName', 'Unknown')
+            dec = p_stats.get('note', '')
+            pitching_rows.append({
+                'name': name, 'ip': str(p_stats.get('inningsPitched', '0')),
+                'h': str(p_stats.get('hits', 0)), 'r': str(p_stats.get('runs', 0)),
+                'er': str(p_stats.get('earnedRuns', 0)), 'bb': str(p_stats.get('baseOnBalls', 0)),
+                'so': str(p_stats.get('strikeOuts', 0)), 'hr': str(p_stats.get('homeRuns', 0)),
+                'era': season_stats.get('era', '-.--'), 'p': str(p_stats.get('pitchesThrown', 0)),
+                's': str(p_stats.get('strikes', 0)), 'dec': dec,
+            })
+
+        pitching_notes = box_data.get('pitchingNotes', [])
+        team_notes = team_data.get('info', [])
+        game_info_raw = box_data.get('info', [])
+        game_info = [i for i in game_info_raw if 'ABS' not in i.get('label', '').upper() and 'CHALLENGE' not in i.get('label', '').upper()]
+        abs_info = [i for i in game_info_raw if 'ABS' in i.get('label', '').upper() or 'CHALLENGE' in i.get('label', '').upper()]
+
+        opp_side = "away" if side == "home" else "home"
+        opp_abbrev = box_data.get('teams', {}).get(opp_side, {}).get('team', {}).get('abbreviation', '??')
+        title = f"{opp_abbrev} @ {team_abbrev}" if side == "home" else f"{team_abbrev} @ {box_data.get('teams',{}).get('home',{}).get('team',{}).get('abbreviation','??')}"
+
+        return BoxScoreData(
+            title=title, team_name=team_name, team_abbrev=team_abbrev,
+            batting_rows=batting_rows, pitching_rows=pitching_rows,
+            pitching_notes=pitching_notes, team_notes=team_notes,
+            game_info=game_info, abs_info=abs_info,
+            game_status=game_status, game_abstract_state=game_abstract,
+            game_date=game_date,
         )
 
     async def get_leaders(self, stat: str, stat_group: str = None, team_id: str = None, year: str = None, league: str = None, player_pool: str = None, position: str = None, reverse: bool = False) -> List["Leader"]:
