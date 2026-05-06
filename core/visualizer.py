@@ -70,6 +70,15 @@ def generate_pitch_plot(pitches, stand: str = "R") -> io.BytesIO:
         (get_x(plate_w_feet), plate_y + 10)
     ], fill=(180, 180, 185))
 
+    # Draw batter's box inner edges: 6 inches outside each edge of home plate
+    box_color = (65, 80, 95)
+    bx_left = get_x(-(plate_w_feet + 0.5))
+    bx_right = get_x(plate_w_feet + 0.5)
+    by_top = get_y(0)   # ground line / front of plate
+    by_bot = height
+    draw.line([bx_left, by_top, bx_left, by_bot], fill=box_color, width=4)
+    draw.line([bx_right, by_top, bx_right, by_bot], fill=box_color, width=4)
+
     # Draw 3x3 strike zone
     zx_left = get_x(-0.708)
     zx_right = get_x(0.708)
