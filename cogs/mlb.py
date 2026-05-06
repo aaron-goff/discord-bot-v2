@@ -1385,7 +1385,7 @@ class MLBSlash(commands.Cog):
             if s.at_bats:
                 all_abs.extend(s.at_bats)
         
-        if all_abs:
+        if all_abs and not milb:
             inning_labels = []
             inning_counts = {}
             # First pass: count innings
