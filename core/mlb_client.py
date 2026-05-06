@@ -79,6 +79,7 @@ class Game:
     no_hitter: bool = False
     perfect_game: bool = False
     no_hitter_pitchers: List[dict] = None
+    level: str = ""
 
     @classmethod
     def from_api_json(cls, data: dict):
@@ -123,6 +124,10 @@ class Game:
             balls=ls.get('balls', 0)
         )
 
+        _sport_level_map = {"Triple-A": "AAA", "Double-A": "AA", "High-A": "A+", "Single-A": "A", "Complex League": "CPX"}
+        sport_name = home_data.get('team', {}).get('sport', {}).get('name', '')
+        game.level = _sport_level_map.get(sport_name, sport_name)
+
         offense = ls.get('offense', {})
         defense = ls.get('defense', {})
         
@@ -132,19 +137,25 @@ class Game:
         if 'third' in offense: bases = bases[:2] + "3"
         game.bases = bases
         
+        def _last_name(d: dict) -> str:
+            if d.get('lastName'):
+                return d['lastName']
+            full = d.get('fullName', '')
+            return full.split()[-1] if full else ''
+
         pitcher_data = defense.get('pitcher', {})
-        game.pitcher = pitcher_data.get('lastName', '')
-        
+        game.pitcher = _last_name(pitcher_data)
+
         if 'stats' in pitcher_data:
             for st in pitcher_data['stats']:
                 if st.get('type', {}).get('displayName') == 'gameLog' and st.get('group', {}).get('displayName') == 'pitching':
                     game.pitch_count = st.get('stats', {}).get('pitchesThrown', 0)
                     break
-        
+
         batter_data = offense.get('batter', {})
-        game.batter = batter_data.get('lastName', '')
+        game.batter = _last_name(batter_data)
         on_deck_data = offense.get('onDeck', {})
-        game.on_deck = on_deck_data.get('lastName', '')
+        game.on_deck = _last_name(on_deck_data)
         
         def find_lineup_pos(player_id, lineups):
             if not lineups: return ""
@@ -3666,6 +3677,71 @@ class MLBClient:
             'inning_columns': sorted(columns_seen, key=lambda x: int(x) if x.isdigit() else 99),
             'pitchers': pitchers,
         }
+
+    async def get_milb_games(self, team_query: str, date: str = None, level_filter: str = None):
+        """Fetch MiLB games for a team_query (MLB org abbrev → affiliates, or MiLB team name/abbrev).
+        Returns (List[Game], label_str)."""
+        session = await self.get_session()
+        season = str(datetime.now().year)
+
+        async with session.get(f"{self.BASE_URL}/teams?sportId=1") as resp:
+            mlb_data = await resp.json()
+        async with session.get(f"{self.BASE_URL}/teams?sportIds=11,12,13,14,15&season={season}") as resp:
+            milb_data = await resp.json()
+
+        mlb_teams = mlb_data.get('teams', [])
+        milb_teams = milb_data.get('teams', [])
+
+        query = team_query.strip().lower()
+        mlb_match = next(
+            (t for t in mlb_teams if query == t.get('abbreviation', '').lower()
+             or query in t.get('name', '').lower()
+             or query in t.get('teamName', '').lower()),
+            None
+        )
+
+        if mlb_match:
+            org_id = mlb_match['id']
+            label = f"{mlb_match.get('teamName', mlb_match['name'])} Affiliates"
+            affiliate_ids = [t['id'] for t in milb_teams if t.get('parentOrgId') == org_id]
+            if not affiliate_ids:
+                return [], label
+            team_id_param = ','.join(str(i) for i in affiliate_ids)
+        else:
+            milb_match = next(
+                (t for t in milb_teams if query == t.get('abbreviation', '').lower()
+                 or query in t.get('name', '').lower()
+                 or query in t.get('teamName', '').lower()),
+                None
+            )
+            if not milb_match:
+                return [], ""
+            label = milb_match['name']
+            team_id_param = str(milb_match['id'])
+
+        url = (f"{self.BASE_URL}/schedule?sportId=11,12,13,14,15"
+               f"&teamId={team_id_param}"
+               f"&hydrate=team,linescore(matchup,runners),probablePitcher,decisions")
+        if date:
+            url += f"&date={date}"
+
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+        if not data.get('dates'):
+            return [], label
+
+        level_abbrevs = {"aaa": "AAA", "aa": "AA", "a+": "A+", "high-a": "A+", "a": "A", "single-a": "A"}
+        want_level = level_abbrevs.get(level_filter.lower(), level_filter.upper()) if level_filter else None
+
+        games = []
+        for game_data in data['dates'][0]['games']:
+            game = Game.from_api_json(game_data)
+            if want_level and game.level != want_level:
+                continue
+            games.append(game)
+
+        return games, label
 
     async def get_todays_games(self, team_query: str = None, date: str = None) -> List[Game]:
         session = await self.get_session()
