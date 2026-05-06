@@ -1391,6 +1391,122 @@ class MLBSlash(commands.Cog):
     async def milb_last_player_autocomplete(self, interaction: discord.Interaction, current: str):
         return await self.milb_stats_player_autocomplete(interaction, current)
 
+    @milb.command(name="score", description="Get MiLB scores for a team or all affiliates of an MLB org")
+    @app_commands.describe(team="MLB org (e.g. WSH) for all affiliates, or a MiLB team name/abbrev")
+    @app_commands.describe(date="A specific date (e.g. 4/7/26, yesterday, -1)")
+    @app_commands.describe(level="Filter by level (only applies to org affiliate view)")
+    @app_commands.choices(level=[
+        app_commands.Choice(name="Triple-A", value="aaa"),
+        app_commands.Choice(name="Double-A", value="aa"),
+        app_commands.Choice(name="High-A", value="a+"),
+        app_commands.Choice(name="Single-A", value="a"),
+    ])
+    async def milb_score(self, interaction: discord.Interaction, team: str, date: str = None, level: app_commands.Choice[str] = None):
+        await interaction.response.defer()
+        parsed_date = parse_date(date) if date else None
+        level_filter = level.value if level else None
+
+        games, label = await self.bot.mlb_client.get_milb_games(team, date=parsed_date, level_filter=level_filter)
+
+        if not games:
+            if not label:
+                await interaction.followup.send(f"Could not find a team matching \"{team}\".")
+            else:
+                await interaction.followup.send(f"No games found for {label}.")
+            return
+
+        def game_name(game) -> str:
+            level_tag = f"[{game.level}] " if game.level else ""
+            if game.abstract_state == "Live":
+                return f"🔴 {level_tag}{game.away.abbreviation} @ {game.home.abbreviation} - {game.status}"
+            elif game.abstract_state == "Final":
+                final_str = f"{game.status}/{game.inning}" if game.inning != 9 and game.inning > 0 else game.status
+                return f"🏁 {level_tag}{game.away.abbreviation} @ {game.home.abbreviation} - {final_str}"
+            else:
+                return f"🗓️ {level_tag}{game.away.abbreviation} @ {game.home.abbreviation} - {game.status}"
+
+        title = f"MiLB Scores — {label}"
+        if parsed_date:
+            title += f" ({parsed_date})"
+        if level:
+            title += f" ({level.name})"
+
+        if len(games) == 1:
+            game = games[0]
+            value = f"```python\n{game.format_score_line()}\n```"
+            last_play = game.format_last_play()
+            if last_play:
+                value += f"\n{last_play}"
+            embed = discord.Embed(title=game_name(game), description=value, color=discord.Color.blue())
+            await interaction.followup.send(embed=embed)
+            return
+
+        current_embed = discord.Embed(title=title, color=discord.Color.blue())
+        embeds = []
+        for game in games:
+            name = game_name(game)
+            value = f"```python\n{game.format_score_line()}\n```"
+            last_play = game.format_last_play()
+            if last_play:
+                value += f"\n{last_play}"
+            if len(current_embed.fields) >= 25 or len(current_embed) + len(name) + len(value) > 5900:
+                embeds.append(current_embed)
+                current_embed = discord.Embed(title=f"{title} (Cont.)", color=discord.Color.blue())
+            current_embed.add_field(name=name, value=value, inline=False)
+
+        embeds.append(current_embed)
+        await interaction.followup.send(embeds=embeds)
+
+    @milb_score.autocomplete('team')
+    async def milb_score_team_autocomplete(self, interaction: discord.Interaction, current: str):
+        session = await self.bot.mlb_client.get_session()
+        query = current.lower().strip()
+
+        # Pinned entries: WSH org + 4 Nationals affiliates always at top when query is empty
+        PINNED = [
+            app_commands.Choice(name="WSH — Nationals (All Affiliates)", value="WSH"),
+            app_commands.Choice(name="ROC — Rochester Red Wings (Triple-A)", value="ROC"),
+            app_commands.Choice(name="HBG — Harrisburg Senators (Double-A)", value="HBG"),
+            app_commands.Choice(name="WIL — Wilmington Blue Rocks (High-A)", value="WIL"),
+            app_commands.Choice(name="FBG — Fredericksburg Nationals (Single-A)", value="FBG"),
+        ]
+        PINNED_VALUES = {c.value for c in PINNED}
+
+        if not query:
+            choices = list(PINNED)
+        else:
+            choices = [c for c in PINNED if query in c.name.lower()]
+
+        async with session.get(f"{self.bot.mlb_client.BASE_URL}/teams?sportId=1") as resp:
+            mlb_data = await resp.json()
+        for t in mlb_data.get('teams', []):
+            abbrev = t.get('abbreviation', '')
+            if abbrev in PINNED_VALUES:
+                continue
+            name = t.get('name', '')
+            team_name = t.get('teamName', name)
+            if not query or query in abbrev.lower() or query in name.lower():
+                choices.append(app_commands.Choice(name=f"{abbrev} — {team_name} (All Affiliates)", value=abbrev))
+            if len(choices) >= 15:
+                break
+
+        if len(choices) < 25:
+            season = str(__import__('datetime').datetime.now().year)
+            async with session.get(f"{self.bot.mlb_client.BASE_URL}/teams?sportIds=11,12,13,14,15&season={season}") as resp:
+                milb_data = await resp.json()
+            for t in milb_data.get('teams', []):
+                abbrev = t.get('abbreviation', '')
+                if abbrev in PINNED_VALUES:
+                    continue
+                name = t.get('name', '')
+                sport = t.get('sport', {}).get('name', '')
+                if not query or query in abbrev.lower() or query in name.lower():
+                    choices.append(app_commands.Choice(name=f"{abbrev} — {name} ({sport})", value=abbrev))
+                if len(choices) >= 25:
+                    break
+
+        return choices[:25]
+
     @milb.command(name="box", description="Get the box score for a MiLB team's game")
     @app_commands.describe(team="Team name or affiliate abbreviation (e.g. wsh, wilmington, blue rocks)", date="A specific date (e.g. 4/7/26, yesterday). Leave blank for today.")
     @app_commands.describe(part="Which part of the box score to show")
