@@ -511,7 +511,19 @@ class MonitorCog(commands.Cog):
         matchup = f"{away}@{home}" if away and home else team
 
         num_str = f" (#{hr_num})" if hr_num else ""
-        title   = f"💣 {matchup} — ({team}) {batter}{num_str} | {dist} ft"
+
+        # Most notable qualifier goes in the title; the others fall to the stats line
+        if parks is not None and 0 < parks <= HR_PARKS_THRESHOLD:
+            title_key = "parks"
+            title_stat = f"{parks}/30 parks"
+        elif xba is not None and xba < HR_XBA_THRESHOLD:
+            title_key = "xba"
+            title_stat = f"xBA {xba:.3f}"
+        else:
+            title_key = "dist"
+            title_stat = f"{dist} ft"
+
+        title = f"💣 {matchup} — ({team}) {batter}{num_str} | {title_stat}"
 
         parts = []
         if pitch_type and pitch_spd:
@@ -520,9 +532,11 @@ class MonitorCog(commands.Cog):
             parts.append(f"{ev:.1f} mph EV")
         if la:
             parts.append(f"{la}° LA")
-        if xba is not None:
+        if title_key != "dist" and dist:
+            parts.append(f"{dist} ft")
+        if title_key != "xba" and xba is not None:
             parts.append(f"xBA {xba:.3f}")
-        if parks is not None:
+        if title_key != "parks" and parks is not None:
             parts.append(f"{parks}/30 parks")
 
         desc_fmt = desc.replace(batter, f"**{batter}**", 1)
