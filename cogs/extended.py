@@ -151,7 +151,9 @@ class ExtendedSlash(commands.Cog):
         latest_frame = past_frames[-1]
         rv_path = latest_frame['path']
         from datetime import timezone
-        radar_ts = datetime.fromtimestamp(latest_frame['time'], tz=timezone.utc).strftime("%b %d, %Y %H:%M UTC")
+        radar_age_secs = int(datetime.now(tz=timezone.utc).timestamp()) - latest_frame['time']
+        radar_age_mins = radar_age_secs // 60
+        radar_ts = f"{radar_age_mins} minute{'s' if radar_age_mins != 1 else ''} ago"
 
         # 3. Compute center tile and exact sub-tile pixel position of the query point
         gx, gy = _lat_lon_to_pixel(lat, lon, MAP_ZOOM)  # global pixel at MAP_ZOOM
