@@ -37,10 +37,26 @@ class ExtendedSlash(commands.Cog):
     async def weather(self, interaction: discord.Interaction, location: str):
         await interaction.response.defer()
 
-        encoded = urllib.parse.quote(location)
-        url = f"https://wttr.in/{encoded}?format=j1"
-
         session = await self.bot.mlb_client.get_session()
+
+        # Pre-geocode US zip codes so wttr.in doesn't pick a foreign location
+        is_us_zip = location.strip().replace('-', '').isdigit() and len(location.strip()) in (5, 9)
+        if is_us_zip:
+            geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(location)}&format=json&limit=1&countrycodes=us"
+            try:
+                async with session.get(geo_url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
+                    geo_data = await resp.json() if resp.status == 200 else []
+                if geo_data:
+                    lat, lon = geo_data[0]['lat'], geo_data[0]['lon']
+                    wttr_query = urllib.parse.quote(f"{lat},{lon}")
+                else:
+                    wttr_query = urllib.parse.quote(location)
+            except Exception:
+                wttr_query = urllib.parse.quote(location)
+        else:
+            wttr_query = urllib.parse.quote(location)
+
+        url = f"https://wttr.in/{wttr_query}?format=j1"
         try:
             async with session.get(url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
                 if resp.status != 200:
@@ -53,6 +69,7 @@ class ExtendedSlash(commands.Cog):
 
         current = data.get("current_condition", [{}])[0]
         area = data.get("nearest_area", [{}])[0]
+        hourly = data.get("weather", [{}])[0].get("hourly", [])
 
         area_name = area.get("areaName", [{}])[0].get("value", location)
         region = area.get("region", [{}])[0].get("value", "")
@@ -75,21 +92,23 @@ class ExtendedSlash(commands.Cog):
         visibility = current.get("visibility", "?")
         precip = current.get("precipInches", "0.0")
 
-        desc_lower = desc.lower()
-        if "thunder" in desc_lower:
-            icon = "⛈️"
-        elif "snow" in desc_lower or "blizzard" in desc_lower:
-            icon = "❄️"
-        elif "rain" in desc_lower or "drizzle" in desc_lower or "shower" in desc_lower:
-            icon = "🌧️"
-        elif "overcast" in desc_lower or "cloudy" in desc_lower:
-            icon = "☁️"
-        elif "partly" in desc_lower or "mist" in desc_lower or "fog" in desc_lower:
-            icon = "⛅"
-        elif "sunny" in desc_lower or "clear" in desc_lower:
-            icon = "☀️"
-        else:
-            icon = "🌡️"
+        def desc_to_icon(d):
+            d = d.lower()
+            if "thunder" in d:
+                return "⛈️"
+            elif "snow" in d or "blizzard" in d:
+                return "❄️"
+            elif "rain" in d or "drizzle" in d or "shower" in d:
+                return "🌧️"
+            elif "overcast" in d or "cloudy" in d:
+                return "☁️"
+            elif "partly" in d or "mist" in d or "fog" in d:
+                return "⛅"
+            elif "sunny" in d or "clear" in d:
+                return "☀️"
+            return "🌡️"
+
+        icon = desc_to_icon(desc)
 
         wind_str = f"{wind_mph} mph {wind_dir}".strip()
 
@@ -105,6 +124,18 @@ class ExtendedSlash(commands.Cog):
         embed.add_field(name="Visibility", value=f"{visibility} mi", inline=True)
         if float(precip) > 0:
             embed.add_field(name="Precipitation", value=f"{precip} in", inline=True)
+
+        hourly_by_time = {h.get("time"): h for h in hourly}
+        forecast_parts = []
+        for label, time_key in [("Morning", "900"), ("Noon", "1200"), ("Evening", "1800"), ("Night", "2100")]:
+            h = hourly_by_time.get(time_key)
+            if h:
+                h_desc = h.get("weatherDesc", [{}])[0].get("value", "")
+                h_icon = desc_to_icon(h_desc)
+                h_temp = h.get("tempF", "?")
+                forecast_parts.append(f"`{label:<7}` {h_icon} {h_desc} · {h_temp}°F")
+        if forecast_parts:
+            embed.add_field(name="Today's Forecast", value="\n".join(forecast_parts), inline=False)
 
         await interaction.followup.send(embed=embed)
 
