@@ -2,6 +2,8 @@ import io
 import math
 import asyncio
 import urllib.parse
+from datetime import datetime
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -146,7 +148,10 @@ class ExtendedSlash(commands.Cog):
             return
 
         rv_host = rv_data['host']
-        rv_path = past_frames[-1]['path']
+        latest_frame = past_frames[-1]
+        rv_path = latest_frame['path']
+        from datetime import timezone
+        radar_ts = datetime.fromtimestamp(latest_frame['time'], tz=timezone.utc).strftime("%b %d, %Y %H:%M UTC")
 
         # 3. Compute center tile and exact sub-tile pixel position of the query point
         gx, gy = _lat_lon_to_pixel(lat, lon, MAP_ZOOM)  # global pixel at MAP_ZOOM
@@ -164,22 +169,25 @@ class ExtendedSlash(commands.Cog):
         ry_max = (cy + half) // SCALE
         radar_offsets = [(rx, ry) for ry in range(ry_min, ry_max + 1) for rx in range(rx_min, rx_max + 1)]
 
-        async def fetch(url):
-            try:
-                async with session.get(url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
-                    if resp.status == 200:
-                        return await resp.read()
-            except Exception:
-                pass
-            return None
+        # Use a dedicated session with a higher connector limit for concurrent tile fetching
+        connector = aiohttp.TCPConnector(limit=50)
+        async with aiohttp.ClientSession(connector=connector) as tile_session:
+            async def fetch(url):
+                try:
+                    async with tile_session.get(url, headers={"User-Agent": "discord-bot/1.0"}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            return await resp.read()
+                except Exception:
+                    pass
+                return None
 
-        map_tasks = [fetch(f"https://tile.openstreetmap.org/{MAP_ZOOM}/{cx+dx}/{cy+dy}.png") for dx, dy in map_offsets]
-        radar_tasks = [fetch(f"{rv_host}{rv_path}/256/{RADAR_ZOOM}/{rx}/{ry}/2/1_1.png") for rx, ry in radar_offsets]
+            map_tasks = [fetch(f"https://tile.openstreetmap.org/{MAP_ZOOM}/{cx+dx}/{cy+dy}.png") for dx, dy in map_offsets]
+            radar_tasks = [fetch(f"{rv_host}{rv_path}/256/{RADAR_ZOOM}/{rx}/{ry}/2/1_1.png") for rx, ry in radar_offsets]
 
-        map_results, radar_results = await asyncio.gather(
-            asyncio.gather(*map_tasks),
-            asyncio.gather(*radar_tasks),
-        )
+            map_results, radar_results = await asyncio.gather(
+                asyncio.gather(*map_tasks),
+                asyncio.gather(*radar_tasks),
+            )
 
         # 4. Build composite in executor
         loop = asyncio.get_event_loop()
@@ -216,8 +224,8 @@ class ExtendedSlash(commands.Cog):
             composited = Image.alpha_composite(base_img, radar_overlay)
 
             # Crop the large canvas to OUTPUT_SIZE centered on the exact query pixel
-            qx = int(gx - (cx - half) * TILE_SIZE)  # query pixel x within canvas
-            qy = int(gy - (cy - half) * TILE_SIZE)  # query pixel y within canvas
+            qx = int(gx - (cx - half) * TILE_SIZE)
+            qy = int(gy - (cy - half) * TILE_SIZE)
             half_out = OUTPUT_SIZE // 2
             left = max(0, min(qx - half_out, canvas_size - OUTPUT_SIZE))
             top  = max(0, min(qy - half_out, canvas_size - OUTPUT_SIZE))
@@ -228,14 +236,19 @@ class ExtendedSlash(commands.Cog):
             buf.seek(0)
             return buf
 
-        buf = await loop.run_in_executor(None, build_image)
+        try:
+            buf = await loop.run_in_executor(None, build_image)
+        except Exception as e:
+            print(f"[radar] build_image error: {e}")
+            await interaction.followup.send("Error generating radar image.")
+            return
 
         embed = discord.Embed(
             title=f"🌧️ Radar — {display_name}",
             color=discord.Color.blue()
         )
         embed.set_image(url="attachment://radar.jpg")
-        embed.set_footer(text="Base map: OpenStreetMap · Radar: RainViewer")
+        embed.set_footer(text=f"Base map: OpenStreetMap · Radar: RainViewer · Updated {radar_ts}")
 
         await interaction.followup.send(embed=embed, file=discord.File(buf, filename="radar.jpg"))
 
