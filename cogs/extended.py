@@ -8,8 +8,10 @@ from discord.ext import commands
 from PIL import Image
 
 
-RADAR_ZOOM = 7  # each tile ~310km wide; 3×3 grid covers ~930km
+MAP_ZOOM = 8     # base map zoom — each tile ~155km, 3×3 grid ≈ 465km wide
+RADAR_ZOOM = 6   # max zoom level RainViewer radar supports
 TILE_SIZE = 256
+SCALE = 2 ** (MAP_ZOOM - RADAR_ZOOM)  # 4: one radar tile = 4×4 base-map tiles
 
 
 def _lat_lon_to_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
@@ -108,8 +110,10 @@ class ExtendedSlash(commands.Cog):
 
         session = await self.bot.mlb_client.get_session()
 
-        # 1. Geocode location via Nominatim
-        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(location)}&format=json&limit=1"
+        # 1. Geocode via Nominatim; bias to US for bare zip codes
+        is_us_zip = location.strip().replace('-', '').isdigit() and len(location.strip()) in (5, 9)
+        country_param = "&countrycodes=us" if is_us_zip else ""
+        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(location)}&format=json&limit=1{country_param}"
         try:
             async with session.get(geo_url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
                 geo_data = await resp.json() if resp.status == 200 else []
@@ -141,15 +145,20 @@ class ExtendedSlash(commands.Cog):
         rv_host = rv_data['host']
         rv_path = past_frames[-1]['path']
 
-        # 3. Compute center tile and build 3×3 grid
-        cx, cy = _lat_lon_to_tile(lat, lon, RADAR_ZOOM)
-        grid = 3
-        canvas_size = TILE_SIZE * grid
+        # 3. Compute center tiles at each zoom
+        cx, cy = _lat_lon_to_tile(lat, lon, MAP_ZOOM)
 
-        base_img = Image.new('RGBA', (canvas_size, canvas_size), (200, 200, 200, 255))
-        radar_img = Image.new('RGBA', (canvas_size, canvas_size), (0, 0, 0, 0))
+        # Base map: 3×3 grid at MAP_ZOOM
+        map_offsets = [(dx, dy) for dy in range(-1, 2) for dx in range(-1, 2)]
 
-        async def fetch_tile(url):
+        # Radar: find which RADAR_ZOOM tiles cover the base map extent
+        rx_min = (cx - 1) // SCALE
+        rx_max = (cx + 1) // SCALE
+        ry_min = (cy - 1) // SCALE
+        ry_max = (cy + 1) // SCALE
+        radar_offsets = [(rx, ry) for ry in range(ry_min, ry_max + 1) for rx in range(rx_min, rx_max + 1)]
+
+        async def fetch(url):
             try:
                 async with session.get(url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
                     if resp.status == 200:
@@ -158,33 +167,52 @@ class ExtendedSlash(commands.Cog):
                 pass
             return None
 
-        # Fetch all tiles concurrently
-        offsets = [(dx, dy) for dy in range(-1, 2) for dx in range(-1, 2)]
-        osm_tasks = [fetch_tile(f"https://tile.openstreetmap.org/{RADAR_ZOOM}/{cx+dx}/{cy+dy}.png") for dx, dy in offsets]
-        radar_tasks = [fetch_tile(f"{rv_host}{rv_path}/{RADAR_ZOOM}/{cx+dx}/{cy+dy}/2/1_1.png") for dx, dy in offsets]
+        map_tasks = [fetch(f"https://tile.openstreetmap.org/{MAP_ZOOM}/{cx+dx}/{cy+dy}.png") for dx, dy in map_offsets]
+        radar_tasks = [fetch(f"{rv_host}{rv_path}/256/{RADAR_ZOOM}/{rx}/{ry}/2/1_1.png") for rx, ry in radar_offsets]
 
-        osm_results, radar_results = await asyncio.gather(
-            asyncio.gather(*osm_tasks),
+        map_results, radar_results = await asyncio.gather(
+            asyncio.gather(*map_tasks),
             asyncio.gather(*radar_tasks),
         )
 
-        # 4. Composite tiles
+        # 4. Build composite in executor
         loop = asyncio.get_event_loop()
 
         def build_image():
-            for i, (dx, dy) in enumerate(offsets):
-                px = (dx + 1) * TILE_SIZE
-                py = (dy + 1) * TILE_SIZE
+            canvas_size = TILE_SIZE * 3  # 768×768
 
-                if osm_results[i]:
-                    tile = Image.open(io.BytesIO(osm_results[i])).convert('RGBA')
-                    base_img.paste(tile, (px, py))
+            # Stitch base map
+            base_img = Image.new('RGBA', (canvas_size, canvas_size), (180, 180, 180, 255))
+            for i, (dx, dy) in enumerate(map_offsets):
+                if map_results[i]:
+                    tile = Image.open(io.BytesIO(map_results[i])).convert('RGBA')
+                    base_img.paste(tile, ((dx + 1) * TILE_SIZE, (dy + 1) * TILE_SIZE))
 
+            # Stitch radar tiles at RADAR_ZOOM, then scale up and crop to align
+            r_cols = rx_max - rx_min + 1
+            r_rows = ry_max - ry_min + 1
+            radar_canvas = Image.new('RGBA', (r_cols * TILE_SIZE, r_rows * TILE_SIZE), (0, 0, 0, 0))
+            for i, (rx, ry) in enumerate(radar_offsets):
                 if radar_results[i]:
                     tile = Image.open(io.BytesIO(radar_results[i])).convert('RGBA')
-                    radar_img.paste(tile, (px, py))
+                    radar_canvas.paste(tile, ((rx - rx_min) * TILE_SIZE, (ry - ry_min) * TILE_SIZE))
 
-            composited = Image.alpha_composite(base_img, radar_img)
+            # Scale radar up to base map pixel space
+            radar_scaled = radar_canvas.resize(
+                (r_cols * TILE_SIZE * SCALE, r_rows * TILE_SIZE * SCALE),
+                Image.NEAREST
+            )
+
+            # Crop radar to align with base map canvas
+            # Base map top-left is global pixel (cx-1, cy-1) at MAP_ZOOM
+            # Radar top-left is global pixel (rx_min * SCALE, ry_min * SCALE) at MAP_ZOOM
+            crop_x = (cx - 1) - rx_min * SCALE
+            crop_y = (cy - 1) - ry_min * SCALE
+            crop_x_px = crop_x * TILE_SIZE
+            crop_y_px = crop_y * TILE_SIZE
+            radar_overlay = radar_scaled.crop((crop_x_px, crop_y_px, crop_x_px + canvas_size, crop_y_px + canvas_size))
+
+            composited = Image.alpha_composite(base_img, radar_overlay)
             buf = io.BytesIO()
             composited.convert('RGB').save(buf, format='JPEG', quality=85)
             buf.seek(0)
