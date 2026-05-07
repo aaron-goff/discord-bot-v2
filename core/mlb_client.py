@@ -1403,6 +1403,104 @@ class MLBClient:
         await asyncio.gather(*(process_game(g) for g in games))
         return games
 
+    async def get_game_plays_for_inning(self, team_query: str, inning: int, date: str = None):
+        """Return (game, plays, team_abbrev, team_half) for a team's batting side of a given inning."""
+        games = await self.get_todays_games(team_query=team_query, date=date)
+        if not games:
+            return None, None, None, None
+
+        game = games[0]
+        team_id = await self.get_team_id(team_query)
+        if not team_id:
+            return game, [], game.away.abbreviation, 'top'
+
+        team_side = 'away' if game.away.id == team_id else 'home'
+        team_half = 'top' if team_side == 'away' else 'bottom'
+        team_abbrev = game.away.abbreviation if team_side == 'away' else game.home.abbreviation
+
+        session = await self.get_session()
+        pbp_url = f"{self.BASE_URL}/game/{game.game_pk}/playByPlay"
+        content_url = f"{self.BASE_URL}/game/{game.game_pk}/content"
+
+        try:
+            async with session.get(pbp_url) as resp:
+                pbp_data = await resp.json() if resp.status == 200 else {}
+            async with session.get(content_url) as resp:
+                content_data = await resp.json() if resp.status == 200 else {}
+        except Exception as e:
+            print(f"Error fetching plays for inning: {e}")
+            return game, [], team_abbrev, team_half
+
+        content_dict = {}
+        for item in content_data.get('highlights', {}).get('highlights', {}).get('items', []):
+            if 'guid' in item:
+                for pb in item.get('playbacks', []):
+                    if pb.get('name') == 'mp4Avc':
+                        content_dict[item['guid']] = {'url': pb['url'], 'blurb': item.get('headline', item.get('blurb', ''))}
+                        break
+
+        plays = []
+        for play in pbp_data.get('allPlays', []):
+            about = play.get('about', {})
+            if about.get('halfInning') != team_half:
+                continue
+            if about.get('inning') != inning:
+                continue
+
+            result = play.get('result', {})
+            desc = result.get('description', '')
+            desc = _bold_play_description(desc, play)
+
+            score_str = ''
+            if 'awayScore' in result:
+                score_str = f"({result['awayScore']}-{result['homeScore']})"
+
+            count = play.get('count', {})
+            balls = count.get('balls', 0)
+            strikes = count.get('strikes', 0)
+            outs_before = about.get('startOuts', 0)
+
+            vid_url, vid_blurb = '', ''
+            events = play.get('playEvents', [])
+            if events:
+                play_id = events[-1].get('playId', '')
+                if play_id and play_id in content_dict:
+                    vid_url = content_dict[play_id]['url']
+                    vid_blurb = content_dict[play_id]['blurb']
+
+            plays.append({
+                'event': result.get('event', ''),
+                'desc': desc,
+                'score': score_str,
+                'count': f"{balls}-{strikes}",
+                'outs_before': outs_before,
+                'is_scoring': about.get('isScoringPlay', False),
+                'video_url': vid_url,
+                'video_blurb': vid_blurb,
+                'rbi': result.get('rbi', 0),
+            })
+
+        return game, plays, team_abbrev, team_half
+
+    async def get_game_linescore_data(self, team_query: str, date: str = None):
+        """Return (game, linescore_json) for a team's game."""
+        games = await self.get_todays_games(team_query=team_query, date=date)
+        if not games:
+            return None, None
+
+        game = games[0]
+        session = await self.get_session()
+
+        url = f"{self.BASE_URL}/game/{game.game_pk}/linescore"
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return game, None
+                return game, await resp.json()
+        except Exception as e:
+            print(f"Error fetching linescore: {e}")
+            return game, None
+
     async def get_recent_home_runs(self, date: str = None) -> List[dict]:
         session = await self.get_session()
         from datetime import timezone
