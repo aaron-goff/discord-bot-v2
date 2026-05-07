@@ -137,6 +137,7 @@ class MLBSlash(commands.Cog):
     mlb = app_commands.Group(name="mlb", description="MLB stats and scores commands")
     milb = app_commands.Group(name="milb", description="MiLB stats and scores commands")
     savant = app_commands.Group(name="savant", description="Baseball Savant / Statcast commands")
+    mlb_game = app_commands.Group(name="game", description="Game-specific commands (plays, linescore, scoring plays)", parent=mlb)
 
     @mlb.command(name="line", description="Get a player's stat line for today or a specific date")
     @app_commands.describe(player="The player to search for")
@@ -327,10 +328,10 @@ class MLBSlash(commands.Cog):
                 choices.append(app_commands.Choice(name=name, value=value))
         return choices[:25]
 
-    @mlb.command(name="sp", description="Get all scoring plays for a team in a given game.")
+    @mlb_game.command(name="scoringplays", description="Get all scoring plays for a team in a game.")
     @app_commands.describe(team="The team to get scoring plays for (e.g. wsh, nationals)")
     @app_commands.describe(date="A specific date (e.g. 4/7/26, yesterday, +2, -5)")
-    async def scoring_plays(self, interaction: discord.Interaction, team: str, date: str = None):
+    async def game_scoring_plays(self, interaction: discord.Interaction, team: str, date: str = None):
         await interaction.response.defer()
         parsed_date = parse_date(date)
 
@@ -339,7 +340,7 @@ class MLBSlash(commands.Cog):
         if not games:
             await interaction.followup.send("Could not find a game for that team on the specified date.")
             return
-        
+
         embeds = []
         for i, game in enumerate(games, 1):
             embed = discord.Embed(color=discord.Color.blue())
@@ -350,7 +351,7 @@ class MLBSlash(commands.Cog):
                     f"🗓️ {game.away.abbreviation} @ {game.home.abbreviation} - {game.status}"
             if len(games) > 1: title += f" (Game {i})"
             embed.title = title
-            
+
             desc = f"```python\n{game.format_score_line()}\n```\n"
             if game.scoring_plays:
                 desc += "### Scoring Plays\n"
@@ -365,6 +366,143 @@ class MLBSlash(commands.Cog):
             embeds.append(embed)
 
         await interaction.followup.send(embeds=embeds)
+
+    @game_scoring_plays.autocomplete('team')
+    async def game_scoring_plays_team_ac(self, interaction: discord.Interaction, current: str):
+        return await self.team_autocomplete(interaction, current)
+
+    @mlb_game.command(name="plays", description="Get play-by-play for a team's batting side of a specific inning.")
+    @app_commands.describe(team="The team (e.g. wsh, nationals)", inning="Inning number", date="A specific date (e.g. 4/7/26, yesterday, +2, -5)")
+    async def game_plays(self, interaction: discord.Interaction, team: str, inning: int, date: str = None):
+        await interaction.response.defer()
+        parsed_date = parse_date(date)
+
+        game, plays, team_abbrev, team_half = await self.bot.mlb_client.get_game_plays_for_inning(team, inning, date=parsed_date)
+
+        if game is None:
+            await interaction.followup.send("Could not find a game for that team on the specified date.")
+            return
+
+        half_label = "Top" if team_half == 'top' else "Bot"
+        opp_abbrev = game.home.abbreviation if team_half == 'top' else game.away.abbreviation
+
+        final_str = f"{game.status}/{game.inning}" if game.inning != 9 and game.inning > 0 else game.status
+        game_title = f"{game.away.abbreviation} @ {game.home.abbreviation}"
+        if game.abstract_state == "Final":
+            game_title += f" — {final_str}"
+        elif game.abstract_state == "Live":
+            game_title += f" — {game.status}"
+
+        embed = discord.Embed(
+            title=f"{half_label} {inning} — {team_abbrev} batting vs {opp_abbrev}",
+            description=f"*{game_title}*\n\n",
+            color=discord.Color.blue()
+        )
+
+        if not plays:
+            embed.description += f"No plays found for the {'top' if team_half == 'top' else 'bottom'} of inning {inning}."
+        else:
+            desc = embed.description
+            for i, play in enumerate(plays, 1):
+                event = play['event'] or 'Play'
+                outs = play['outs_before']
+                outs_str = f"{outs} out" if outs == 1 else f"{outs} outs"
+                prefix = f"({play['count']}, {outs_str})"
+                score_suffix = f" {play['score']}" if play['score'] else ""
+                if play['is_scoring']:
+                    line = f"**{i}. {event}** {prefix}: __{play['desc']}__{score_suffix}\n"
+                else:
+                    line = f"**{i}. {event}** {prefix}: {play['desc']}{score_suffix}\n"
+                if play['video_url']:
+                    line += f"> [🎥 **{play['video_blurb'] or 'Watch'}**]({play['video_url']})\n"
+                line += "\n"
+                desc += line
+            embed.description = desc[:4096].strip()
+
+        await interaction.followup.send(embed=embed)
+
+    @game_plays.autocomplete('team')
+    async def game_plays_team_ac(self, interaction: discord.Interaction, current: str):
+        return await self.team_autocomplete(interaction, current)
+
+    @mlb_game.command(name="linescore", description="Get the inning-by-inning linescore for a team's game.")
+    @app_commands.describe(team="The team (e.g. wsh, nationals)", date="A specific date (e.g. 4/7/26, yesterday, +2, -5)")
+    async def game_linescore(self, interaction: discord.Interaction, team: str, date: str = None):
+        await interaction.response.defer()
+        parsed_date = parse_date(date)
+
+        game, ls_data = await self.bot.mlb_client.get_game_linescore_data(team, date=parsed_date)
+
+        if game is None:
+            await interaction.followup.send("Could not find a game for that team on the specified date.")
+            return
+        if ls_data is None:
+            await interaction.followup.send("Could not fetch linescore data for that game.")
+            return
+
+        innings = ls_data.get('innings', [])
+        totals = ls_data.get('teams', {})
+
+        away_abbr = game.away.abbreviation
+        home_abbr = game.home.abbreviation
+
+        away_inn_runs = [inn.get('away', {}).get('runs') for inn in innings]
+        home_inn_runs = [inn.get('home', {}).get('runs') for inn in innings]
+
+        # Column width per inning: 2 if either team scored ≥10 that inning, else 1
+        col_widths = []
+        for a, h in zip(away_inn_runs, home_inn_runs):
+            col_widths.append(2 if (a is not None and a >= 10) or (h is not None and h >= 10) else 1)
+
+        def inn_label(inn_dict, i):
+            num = inn_dict.get('num', i + 1)
+            return str(num % 10)  # last digit for extra innings
+
+        def fmt_run(runs, width):
+            if runs is None:
+                return 'x'.rjust(width)
+            return str(runs).rjust(width)
+
+        header = '    '
+        for i, inn in enumerate(innings):
+            header += inn_label(inn, i).rjust(col_widths[i]) + ' '
+        header += '|  R  H E'
+
+        away_line = away_abbr.ljust(3) + ' '
+        for i, r in enumerate(away_inn_runs):
+            away_line += fmt_run(r, col_widths[i]) + ' '
+        a_r = totals.get('away', {}).get('runs', game.away.score)
+        a_h = totals.get('away', {}).get('hits', game.away.hits)
+        a_e = totals.get('away', {}).get('errors', game.away.errors)
+        away_line += f'| {a_r:>2} {a_h:>2} {a_e}'
+
+        home_line = home_abbr.ljust(3) + ' '
+        for i, r in enumerate(home_inn_runs):
+            home_line += fmt_run(r, col_widths[i]) + ' '
+        h_r = totals.get('home', {}).get('runs', game.home.score)
+        h_h = totals.get('home', {}).get('hits', game.home.hits)
+        h_e = totals.get('home', {}).get('errors', game.home.errors)
+        home_line += f'| {h_r:>2} {h_h:>2} {h_e}'
+
+        final_str = f"{game.status}/{game.inning}" if game.inning != 9 and game.inning > 0 else game.status
+        if game.abstract_state == "Final":
+            title = f"🏁 {away_abbr} @ {home_abbr} — {final_str}"
+        elif game.abstract_state == "Live":
+            half = "▲" if game.is_top_inning else "▼"
+            title = f"🔴 {away_abbr} @ {home_abbr} — {half}{game.inning}"
+        else:
+            title = f"🗓️ {away_abbr} @ {home_abbr} — {game.status}"
+
+        embed = discord.Embed(
+            title=title,
+            description=f"```\n{header}\n{away_line}\n{home_line}\n```",
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=embed)
+
+    @game_linescore.autocomplete('team')
+    async def game_linescore_team_ac(self, interaction: discord.Interaction, current: str):
+        return await self.team_autocomplete(interaction, current)
 
     @mlb.command(name="pace", description="Calculate a player's projected 162-game season totals.")
     @app_commands.describe(player="The player to calculate pace for")
