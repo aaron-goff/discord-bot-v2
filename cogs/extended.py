@@ -148,10 +148,11 @@ class ExtendedSlash(commands.Cog):
             return
 
         rv_host = rv_data['host']
-        latest_frame = past_frames[-1]
-        rv_path = latest_frame['path']
+        # Use second-to-last frame — the newest frame may not be fully propagated to all CDN nodes yet
+        frame = past_frames[-2] if len(past_frames) >= 2 else past_frames[-1]
+        rv_path = frame['path']
         from datetime import timezone
-        radar_age_secs = int(datetime.now(tz=timezone.utc).timestamp()) - latest_frame['time']
+        radar_age_secs = int(datetime.now(tz=timezone.utc).timestamp()) - frame['time']
         radar_age_mins = radar_age_secs // 60
         radar_ts = f"{radar_age_mins} minute{'s' if radar_age_mins != 1 else ''} ago"
 
@@ -210,8 +211,10 @@ class ExtendedSlash(commands.Cog):
             radar_canvas = Image.new('RGBA', (r_cols * TILE_SIZE, r_rows * TILE_SIZE), (0, 0, 0, 0))
             for i, (rx, ry) in enumerate(radar_offsets):
                 if radar_results[i]:
-                    tile = Image.open(io.BytesIO(radar_results[i])).convert('RGBA')
-                    radar_canvas.paste(tile, ((rx - rx_min) * TILE_SIZE, (ry - ry_min) * TILE_SIZE))
+                    tile = Image.open(io.BytesIO(radar_results[i]))
+                    if tile.mode == 'P':  # palette-mode = RainViewer error tile, skip it
+                        continue
+                    radar_canvas.paste(tile.convert('RGBA'), ((rx - rx_min) * TILE_SIZE, (ry - ry_min) * TILE_SIZE))
 
             radar_scaled = radar_canvas.resize(
                 (r_cols * TILE_SIZE * SCALE, r_rows * TILE_SIZE * SCALE),
