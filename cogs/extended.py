@@ -8,18 +8,21 @@ from discord.ext import commands
 from PIL import Image
 
 
-MAP_ZOOM = 8     # base map zoom — each tile ~155km, 3×3 grid ≈ 465km wide
+MAP_ZOOM = 8     # base map zoom — each tile ~155km
 RADAR_ZOOM = 6   # max zoom level RainViewer radar supports
 TILE_SIZE = 256
 SCALE = 2 ** (MAP_ZOOM - RADAR_ZOOM)  # 4: one radar tile = 4×4 base-map tiles
+OUTPUT_SIZE = 768  # final image size
+GRID = 5  # fetch 5×5 tiles then crop to center on the exact query point
 
 
-def _lat_lon_to_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
+def _lat_lon_to_pixel(lat: float, lon: float, zoom: int) -> tuple[float, float]:
+    """Global pixel position of (lat, lon) at the given zoom level."""
     lat_rad = math.radians(lat)
     n = 2 ** zoom
-    x = int((lon + 180.0) / 360.0 * n)
-    y = int((1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
-    return x, y
+    gx = (lon + 180.0) / 360.0 * n * TILE_SIZE
+    gy = (1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n * TILE_SIZE
+    return gx, gy
 
 
 class ExtendedSlash(commands.Cog):
@@ -145,17 +148,20 @@ class ExtendedSlash(commands.Cog):
         rv_host = rv_data['host']
         rv_path = past_frames[-1]['path']
 
-        # 3. Compute center tiles at each zoom
-        cx, cy = _lat_lon_to_tile(lat, lon, MAP_ZOOM)
+        # 3. Compute center tile and exact sub-tile pixel position of the query point
+        gx, gy = _lat_lon_to_pixel(lat, lon, MAP_ZOOM)  # global pixel at MAP_ZOOM
+        cx = int(gx // TILE_SIZE)
+        cy = int(gy // TILE_SIZE)
 
-        # Base map: 3×3 grid at MAP_ZOOM
-        map_offsets = [(dx, dy) for dy in range(-1, 2) for dx in range(-1, 2)]
+        # Fetch a GRID×GRID tile canvas so we have enough room to crop centered on (gx, gy)
+        half = GRID // 2  # 2 for a 5×5 grid
+        map_offsets = [(dx, dy) for dy in range(-half, half + 1) for dx in range(-half, half + 1)]
 
-        # Radar: find which RADAR_ZOOM tiles cover the base map extent
-        rx_min = (cx - 1) // SCALE
-        rx_max = (cx + 1) // SCALE
-        ry_min = (cy - 1) // SCALE
-        ry_max = (cy + 1) // SCALE
+        # Radar: find which RADAR_ZOOM tiles cover the full GRID×GRID map extent
+        rx_min = (cx - half) // SCALE
+        rx_max = (cx + half) // SCALE
+        ry_min = (cy - half) // SCALE
+        ry_max = (cy + half) // SCALE
         radar_offsets = [(rx, ry) for ry in range(ry_min, ry_max + 1) for rx in range(rx_min, rx_max + 1)]
 
         async def fetch(url):
@@ -179,16 +185,16 @@ class ExtendedSlash(commands.Cog):
         loop = asyncio.get_event_loop()
 
         def build_image():
-            canvas_size = TILE_SIZE * 3  # 768×768
+            canvas_size = TILE_SIZE * GRID  # 1280×1280
 
             # Stitch base map
             base_img = Image.new('RGBA', (canvas_size, canvas_size), (180, 180, 180, 255))
             for i, (dx, dy) in enumerate(map_offsets):
                 if map_results[i]:
                     tile = Image.open(io.BytesIO(map_results[i])).convert('RGBA')
-                    base_img.paste(tile, ((dx + 1) * TILE_SIZE, (dy + 1) * TILE_SIZE))
+                    base_img.paste(tile, ((dx + half) * TILE_SIZE, (dy + half) * TILE_SIZE))
 
-            # Stitch radar tiles at RADAR_ZOOM, then scale up and crop to align
+            # Stitch radar tiles at RADAR_ZOOM, scale up and align with base map canvas
             r_cols = rx_max - rx_min + 1
             r_rows = ry_max - ry_min + 1
             radar_canvas = Image.new('RGBA', (r_cols * TILE_SIZE, r_rows * TILE_SIZE), (0, 0, 0, 0))
@@ -197,22 +203,26 @@ class ExtendedSlash(commands.Cog):
                     tile = Image.open(io.BytesIO(radar_results[i])).convert('RGBA')
                     radar_canvas.paste(tile, ((rx - rx_min) * TILE_SIZE, (ry - ry_min) * TILE_SIZE))
 
-            # Scale radar up to base map pixel space
             radar_scaled = radar_canvas.resize(
                 (r_cols * TILE_SIZE * SCALE, r_rows * TILE_SIZE * SCALE),
                 Image.NEAREST
             )
 
-            # Crop radar to align with base map canvas
-            # Base map top-left is global pixel (cx-1, cy-1) at MAP_ZOOM
-            # Radar top-left is global pixel (rx_min * SCALE, ry_min * SCALE) at MAP_ZOOM
-            crop_x = (cx - 1) - rx_min * SCALE
-            crop_y = (cy - 1) - ry_min * SCALE
-            crop_x_px = crop_x * TILE_SIZE
-            crop_y_px = crop_y * TILE_SIZE
+            # Crop radar to align with the base map canvas top-left corner
+            crop_x_px = ((cx - half) - rx_min * SCALE) * TILE_SIZE
+            crop_y_px = ((cy - half) - ry_min * SCALE) * TILE_SIZE
             radar_overlay = radar_scaled.crop((crop_x_px, crop_y_px, crop_x_px + canvas_size, crop_y_px + canvas_size))
 
             composited = Image.alpha_composite(base_img, radar_overlay)
+
+            # Crop the large canvas to OUTPUT_SIZE centered on the exact query pixel
+            qx = int(gx - (cx - half) * TILE_SIZE)  # query pixel x within canvas
+            qy = int(gy - (cy - half) * TILE_SIZE)  # query pixel y within canvas
+            half_out = OUTPUT_SIZE // 2
+            left = max(0, min(qx - half_out, canvas_size - OUTPUT_SIZE))
+            top  = max(0, min(qy - half_out, canvas_size - OUTPUT_SIZE))
+            composited = composited.crop((left, top, left + OUTPUT_SIZE, top + OUTPUT_SIZE))
+
             buf = io.BytesIO()
             composited.convert('RGB').save(buf, format='JPEG', quality=85)
             buf.seek(0)
