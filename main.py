@@ -21,6 +21,11 @@ class ModernNatsBot(commands.Bot):
 
         # Load the live game monitor (no-hitters, big HRs)
         await self.load_extension('cogs.monitor')
+
+        # Load optional extended commands (weather, etc.) if enabled
+        if os.getenv("EXTENDED_COMMANDS", "").lower() in ("1", "true", "yes"):
+            await self.load_extension('cogs.extended')
+            print("Extended commands enabled.")
         
         # Sync slash commands in the background so startup isn't blocked
         async def _sync():
