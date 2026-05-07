@@ -3,7 +3,7 @@ monitor.py — Live MLB game monitoring cog.
 
 Posts to ALERT_CHANNEL_ID automatically when:
   1. A no-hitter or perfect game is in progress (updates every inning change).
-  2. A home run with projected distance >= HR_DISTANCE_THRESHOLD feet is hit,
+  2. A notable home run is hit (≥420 ft, Nationals HR, ≤5-park HR, or xBA < .200),
      once a highlight video is available.
 
 Polling strategy:
@@ -35,6 +35,8 @@ POLL_INTERVAL        = 60                   # Seconds between monitor ticks
 WAKEUP_WINDOW_MINUTES = 30                  # Start polling when a game is this close
 HR_DISTANCE_THRESHOLD = 420                 # Feet — minimum projected distance for alert
 HR_ALWAYS_ALERT_TEAM  = "WSH"              # Always alert for this team's HRs regardless of distance
+HR_PARKS_THRESHOLD    = 5                  # Alert if HR would only be a HR in ≤ this many parks
+HR_XBA_THRESHOLD      = 0.200             # Alert if xBA is below this value
 HR_STATE_FILE         = "hr_posted.json"   # Persists posted HR keys across restarts
 NH_STATE_FILE         = "nh_state.json"    # Persists NH alert state across restarts
 VIDEO_WAIT_MAX_CYCLES = 10                  # Poll cycles to wait for highlight video
@@ -451,6 +453,42 @@ class MonitorCog(commands.Cog):
         except discord.HTTPException as e:
             print(f"[monitor] failed to post NH alert: {e}")
 
+    def _should_post_hr(self, hr: dict) -> bool:
+        if hr["batter_team"] == HR_ALWAYS_ALERT_TEAM:
+            return True
+        if hr["dist"] >= HR_DISTANCE_THRESHOLD:
+            return True
+        parks = hr.get("parks")
+        if parks is not None and 0 < parks <= HR_PARKS_THRESHOLD:
+            return True
+        xba = hr.get("xba")
+        if xba is not None and xba < HR_XBA_THRESHOLD:
+            return True
+        return False
+
+    async def _fetch_savant_hr_data(self, game_pk: int) -> dict:
+        """Returns {play_id: {'xba': float|None, 'parks': int|None}} from Savant game feed."""
+        session = await self.bot.mlb_client.get_session()
+        url = f"https://baseballsavant.mlb.com/gf?game_pk={game_pk}"
+        try:
+            async with session.get(url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
+                if resp.status != 200:
+                    return {}
+                data = await resp.json(content_type=None)
+        except Exception:
+            return {}
+        result = {}
+        for entry in data.get("exit_velocity", []):
+            play_id = entry.get("play_id")
+            if play_id:
+                xba_str = entry.get("xba", "")
+                parks   = entry.get("contextMetrics", {}).get("homeRunBallparks")
+                result[play_id] = {
+                    "xba":   float(xba_str) if xba_str else None,
+                    "parks": int(parks) if parks is not None else None,
+                }
+        return result
+
     async def _post_hr_alert(self, channel, hr: dict) -> None:
         batter     = hr["batter"]
         team       = hr["batter_team"]
@@ -465,6 +503,8 @@ class MonitorCog(commands.Cog):
         desc       = hr.get("desc", "")
         video_url  = hr.get("video_url", "")
         video_blurb = hr.get("video_blurb", "Watch")
+        xba        = hr.get("xba")
+        parks      = hr.get("parks")
 
         away    = hr.get("away", "")
         home    = hr.get("home", "")
@@ -480,6 +520,10 @@ class MonitorCog(commands.Cog):
             parts.append(f"{ev:.1f} mph EV")
         if la:
             parts.append(f"{la}° LA")
+        if xba is not None:
+            parts.append(f"xBA {xba:.3f}")
+        if parks is not None:
+            parts.append(f"{parks}/30 parks")
 
         desc_fmt = desc.replace(batter, f"**{batter}**", 1)
         body = f"**{inning}:** With **{pitcher}** pitching, {desc_fmt}"
@@ -605,9 +649,6 @@ class MonitorCog(commands.Cog):
             inn_num = about.get("inning", 0)
             batter_team  = home_abbr if half == "bottom" else away_abbr
 
-            if dist < HR_DISTANCE_THRESHOLD and batter_team != HR_ALWAYS_ALERT_TEAM:
-                continue
-
             hr_num = 0
             for keyword in ("grand slam", "home run", "homers"):
                 if keyword in desc:
@@ -638,6 +679,8 @@ class MonitorCog(commands.Cog):
                 "game_pk":      game_pk,
                 "video_url":    "",
                 "video_blurb":  "",
+                "xba":          None,
+                "parks":        None,
             }
 
             if hr_key not in self._hr_pending:
@@ -663,6 +706,8 @@ class MonitorCog(commands.Cog):
                         }
                         break
 
+        savant_data = await self._fetch_savant_hr_data(game_pk)
+
         for hr_key, pending in list(pending_here.items()):
             if hr_key in self._hr_posted:
                 continue
@@ -677,8 +722,13 @@ class MonitorCog(commands.Cog):
             else:
                 video_found = False
 
+            if play_id and play_id in savant_data:
+                hr["xba"]   = savant_data[play_id]["xba"]
+                hr["parks"] = savant_data[play_id]["parks"]
+
             if video_found or cycles >= VIDEO_WAIT_MAX_CYCLES:
-                await self._post_hr_alert(channel, hr)
+                if self._should_post_hr(hr):
+                    await self._post_hr_alert(channel, hr)
                 self._hr_posted.add(hr_key)
                 self._save_hr_state()
                 del self._hr_pending[hr_key]
