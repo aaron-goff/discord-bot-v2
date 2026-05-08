@@ -525,24 +525,28 @@ class MonitorCog(commands.Cog):
 
         title = f"💣 {matchup} — ({team}) {batter}{num_str} | {title_stat}"
 
-        parts = []
+        pitch_parts = []
         if pitch_type and pitch_spd:
-            parts.append(f"{pitch_spd:.1f} mph {pitch_type}")
+            pitch_parts.append(f"{pitch_spd:.1f} mph {pitch_type}")
+
+        hit_parts = []
         if ev:
-            parts.append(f"{ev:.1f} mph EV")
+            hit_parts.append(f"{ev:.1f} mph EV")
         if la:
-            parts.append(f"{la}° LA")
+            hit_parts.append(f"{la}° LA")
         if title_key != "dist" and dist:
-            parts.append(f"{dist} ft")
+            hit_parts.append(f"{dist} ft")
         if title_key != "xba" and xba is not None:
-            parts.append(f"xBA {xba:.3f}")
+            hit_parts.append(f"xBA {xba:.3f}")
         if title_key != "parks" and parks is not None:
-            parts.append(f"{parks}/30 parks")
+            hit_parts.append(f"{parks}/30 parks")
 
         desc_fmt = desc.replace(batter, f"**{batter}**", 1)
         body = f"**{inning}:** With **{pitcher}** pitching, {desc_fmt}"
-        if parts:
-            body += f"\n> *{' | '.join(parts)}*"
+        if pitch_parts:
+            body += f"\n> *{' | '.join(pitch_parts)}*"
+        if hit_parts:
+            body += f"\n> *{' | '.join(hit_parts)}*"
         if video_url:
             body += f"\n> [🎥 **{video_blurb or 'Watch'}**]({video_url})"
 
@@ -958,34 +962,8 @@ class MonitorCog(commands.Cog):
             "game_pk":     0,
             "video_url":   "",
             "video_blurb": "",
-        }
-        await ctx.message.delete()
-        await self._post_hr_alert(ctx.channel, mock_hr)
-
-
-    @commands.command(name="hr_test")
-    async def hr_test(self, ctx):
-        """Test HR alert with mock data. Usage: !hr_test"""
-        mock_hr = {
-            "batter":      "Mickey Moniak",
-            "batter_team": "COL",
-            "pitcher":     "Corbin Burnes",
-            "pitcher_team": "ATH",
-            "away":        "ATH",
-            "home":        "COL",
-            "dist":        438,
-            "ev":          112.4,
-            "la":          28,
-            "pitch_type":  "Four-Seam Fastball",
-            "pitch_speed": 95.2,
-            "rbi":         2,
-            "num":         11,
-            "inning":      "bot 5",
-            "desc":        "Mickey Moniak homers (11) on a fly ball to left center field. Charlie Blackmon scores.",
-            "play_id":     None,
-            "game_pk":     0,
-            "video_url":   "",
-            "video_blurb": "",
+            "xba":         0.891,
+            "parks":       29,
         }
         await ctx.message.delete()
         await self._post_hr_alert(ctx.channel, mock_hr)
