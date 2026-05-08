@@ -11,7 +11,7 @@ from PIL import Image
 
 
 MAP_ZOOM = 8     # base map zoom — each tile ~155km
-RADAR_ZOOM = 6   # max zoom level RainViewer radar supports
+RADAR_ZOOM = 7   # max zoom level RainViewer radar supports
 TILE_SIZE = 256
 SCALE = 2 ** (MAP_ZOOM - RADAR_ZOOM)  # 4: one radar tile = 4×4 base-map tiles
 OUTPUT_SIZE = 768  # final image size
