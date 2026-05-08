@@ -1162,6 +1162,17 @@ class MLBClient:
         return self._team_abbrevs
 
 
+    async def _team_abbrev(self, person: dict, fallback: str = 'FA') -> str:
+        """Get team abbreviation from a person dict, falling back to ID lookup when missing."""
+        abbrev = person.get('currentTeam', {}).get('abbreviation', '')
+        if abbrev:
+            return abbrev
+        team_id = person.get('currentTeam', {}).get('id')
+        if team_id:
+            abbrevs = await self.get_team_abbrevs()
+            return abbrevs.get(team_id, fallback)
+        return fallback
+
     async def get_milb_teams(self) -> list:
         if self._milb_teams_cache:
             return self._milb_teams_cache
@@ -1638,7 +1649,7 @@ class MLBClient:
         person = person_data['people'][0]
         player_name = person.get('fullName', player_name)
         team_id = person.get('currentTeam', {}).get('id')
-        team_abbrev = person.get('currentTeam', {}).get('abbreviation', 'TEAM')
+        team_abbrev = await self._team_abbrev(person, 'TEAM')
 
         # For a specific historical date (MLB only), use gameLog to find the correct team+game
         # rather than assuming the player is on their current team
@@ -1914,7 +1925,7 @@ class MLBClient:
         
         all_stats = person.get('stats', [])
         results = []
-        team_abbrev = person.get('currentTeam', {}).get('abbreviation', 'FA')
+        team_abbrev = await self._team_abbrev(person)
 
         career_years_str = ""
         career_teams = []  # List of (team_id, abbrev) tuples in chronological order
@@ -2074,7 +2085,7 @@ class MLBClient:
             person = person_data['people'][0]
             player_name = person.get('fullName', player_name)
             pos = person.get('primaryPosition', {}).get('abbreviation', '')
-            team_abbrev = person.get('currentTeam', {}).get('abbreviation', 'FA')
+            team_abbrev = await self._team_abbrev(person)
 
             birthdate = person.get('birthDate', '1900-01-01')[:10]
             try:
@@ -2154,7 +2165,7 @@ class MLBClient:
         person = person_data['people'][0]
         player_name = person.get('fullName', player_name)
         pos = person.get('primaryPosition', {}).get('abbreviation', '')
-        team_abbrev = person.get('currentTeam', {}).get('abbreviation', 'FA')
+        team_abbrev = await self._team_abbrev(person)
 
         birthdate = person.get('birthDate', '1900-01-01')[:10]
         try:
@@ -2358,7 +2369,7 @@ class MLBClient:
         person = person_data['people'][0]
         player_name = person.get('fullName', player_name)
         pos = person.get('primaryPosition', {}).get('abbreviation', '')
-        team_abbrev = person.get('currentTeam', {}).get('abbreviation', 'FA')
+        team_abbrev = await self._team_abbrev(person)
 
         info_line = f"{pos}  |  {person.get('batSide', {}).get('code', '')}/{person.get('pitchHand', {}).get('code', '')}  |  {person.get('height', '')}  |  {person.get('weight', '')} lbs"
 
@@ -2467,7 +2478,7 @@ class MLBClient:
         for person in persons:
             full_name = person.get('fullName', 'Unknown')
             last_name = person.get('lastName', full_name)[:5]
-            team_abbrev = person.get('currentTeam', {}).get('abbreviation', 'FA')
+            team_abbrev = await self._team_abbrev(person)
             all_stats = person.get('stats', [])
 
             player_stat = None
