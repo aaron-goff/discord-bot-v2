@@ -10,7 +10,6 @@ ENV/
 
 # Secrets and Configuration
 .env
-tokens.txt
 
 # VS Code
 .vscode/
