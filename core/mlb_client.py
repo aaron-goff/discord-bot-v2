@@ -1135,6 +1135,8 @@ class MLBClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._team_abbrevs: Optional[dict] = None
         self._milb_teams_cache: Optional[list] = None
+        self.favorite_team_name: Optional[str] = None
+        self.favorite_team_affiliates: list = []
 
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -1251,27 +1253,28 @@ class MLBClient:
             return None
 
         if milb:
-            # For MiLB, prioritize Nats org affiliates
-            nats_affiliates = ['nationals', 'senators', 'red wings', 'blue rocks', 'frednats', 'rochester', 'harrisburg', 'wilmington', 'fredericksburg']
+            affiliates = getattr(self, 'favorite_team_affiliates', [])
+            fav_name = getattr(self, 'favorite_team_name', None)
             for p in players:
                 team = p.get('name_display_club', '').lower()
-                if any(aff in team for aff in nats_affiliates):
+                if (fav_name and fav_name in team) or any(aff in team for aff in affiliates):
                     return {'id': str(p['id']), 'name': p['name']}
             return {'id': str(players[0]['id']), 'name': players[0]['name']}
         else:
-            # For MLB: Nationals first, then active MLB, then anyone
-            nats_match = None
+            # For MLB: favorite team first, then active MLB, then anyone
+            fav_name = getattr(self, 'favorite_team_name', None)
+            fav_match = None
             mlb_match = None
             for p in players:
                 team = p.get('name_display_club', '')
                 if not team:
                     continue
-                if 'nationals' in team.lower() and nats_match is None:
-                    nats_match = p
+                if fav_name and fav_name in team.lower() and fav_match is None:
+                    fav_match = p
                 elif p.get('mlb') == 1 and mlb_match is None:
                     mlb_match = p
 
-            best = nats_match or mlb_match or players[0]
+            best = fav_match or mlb_match or players[0]
             return {'id': str(best['id']), 'name': best['name']}
 
     async def get_team_id(self, team_query: str) -> Optional[int]:

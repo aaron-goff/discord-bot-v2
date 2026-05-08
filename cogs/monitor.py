@@ -3,7 +3,7 @@ monitor.py — Live MLB game monitoring cog.
 
 Posts to ALERT_CHANNEL_ID automatically when:
   1. A no-hitter or perfect game is in progress (updates every inning change).
-  2. A notable home run is hit (≥420 ft, Nationals HR, ≤5-park HR, or xBA < .200),
+  2. A notable home run is hit (≥420 ft, favorite team HR, ≤5-park HR, or xBA < .200),
      once a highlight video is available.
 
 Polling strategy:
@@ -30,11 +30,11 @@ from discord.ext import commands, tasks
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-ALERT_CHANNEL_ID     = 733459392263094335   # Channel to post alerts into
+ALERT_CHANNEL_ID     = int(os.getenv("ALERT_CHANNEL_ID", "0")) or None  # Set via env; None disables monitor alerts
 POLL_INTERVAL        = 60                   # Seconds between monitor ticks
 WAKEUP_WINDOW_MINUTES = 30                  # Start polling when a game is this close
 HR_DISTANCE_THRESHOLD = 420                 # Feet — minimum projected distance for alert
-HR_ALWAYS_ALERT_TEAM  = "WSH"              # Always alert for this team's HRs regardless of distance
+HR_ALWAYS_ALERT_TEAM  = os.getenv("HR_ALERT_TEAM", "").upper() or None  # Always alert for this team's HRs regardless of distance
 HR_PARKS_THRESHOLD    = 5                  # Alert if HR would only be a HR in ≤ this many parks
 HR_XBA_THRESHOLD      = 0.200             # Alert if xBA is below this value
 HR_STATE_FILE         = "hr_posted.json"   # Persists posted HR keys across restarts
@@ -277,11 +277,14 @@ class MonitorCog(commands.Cog):
         return {}
 
     async def _get_alert_channel(self):
-        ch = self.bot.get_channel(ALERT_CHANNEL_ID)
+        channel_id = getattr(self.bot, 'alert_channel_id', None) or ALERT_CHANNEL_ID
+        if not channel_id:
+            return None
+        ch = self.bot.get_channel(channel_id)
         if ch:
             return ch
         try:
-            return await self.bot.fetch_channel(ALERT_CHANNEL_ID)
+            return await self.bot.fetch_channel(channel_id)
         except Exception:
             return None
 
@@ -454,7 +457,7 @@ class MonitorCog(commands.Cog):
             print(f"[monitor] failed to post NH alert: {e}")
 
     def _should_post_hr(self, hr: dict) -> bool:
-        if hr["batter_team"] == HR_ALWAYS_ALERT_TEAM:
+        if HR_ALWAYS_ALERT_TEAM and hr["batter_team"] == HR_ALWAYS_ALERT_TEAM:
             return True
         if hr["dist"] >= HR_DISTANCE_THRESHOLD:
             return True
@@ -785,7 +788,7 @@ class MonitorCog(commands.Cog):
 
             channel = await self._get_alert_channel()
             if channel is None:
-                print(f"[monitor] alert channel {ALERT_CHANNEL_ID} not found")
+                print(f"[monitor] alert channel not found (ALERT_CHANNEL_ID={getattr(self.bot, 'alert_channel_id', None) or ALERT_CHANNEL_ID})")
                 return
 
             # Process all games concurrently

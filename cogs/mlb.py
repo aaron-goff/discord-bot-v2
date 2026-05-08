@@ -194,23 +194,23 @@ class MLBSlash(commands.Cog):
         players = await self.bot.mlb_client.search_players(current)
 
         
-        nats_choices = []
+        fav_name = getattr(self.bot, 'favorite_team_name', None)
+        fav_choices = []
         other_choices = []
-        
+
         for p in players:
             team = p.get('name_display_club')
             # The Savant API returns mlb=1 for active Major Leaguers
             if team and p.get('mlb') == 1:
                 name = p.get('name', 'Unknown')
                 choice = app_commands.Choice(name=f"{name} ({team})"[:100], value=str(p.get('id', '')))
-                
-                if "nationals" in team.lower():
-                    nats_choices.append(choice)
+                if fav_name and fav_name in team.lower():
+                    fav_choices.append(choice)
                 else:
                     other_choices.append(choice)
-                    
+
         # Combine and return up to 25 matches for Discord's popup menu
-        return (nats_choices + other_choices)[:25]
+        return (fav_choices + other_choices)[:25]
 
     @mlb.command(name="abs", description="Get a player's at-bats and video highlights for today or a specific date")
     @app_commands.describe(player="The player to search for")
@@ -1401,12 +1401,16 @@ class MLBSlash(commands.Cog):
     async def milb_stats_player_autocomplete(self, interaction: discord.Interaction, current: str):
         if len(current) < 3: return []
         players = await self.bot.mlb_client.search_players(current, milb=True)
-        nats_choices, other_choices = [], []
+        affiliates = getattr(self.bot, 'favorite_team_affiliates', [])
+        fav_name = getattr(self.bot, 'favorite_team_name', None)
+        fav_choices, other_choices = [], []
         for p in players:
             team, name = p.get('name_display_club', 'Unknown'), p.get('name', 'Unknown')
             choice = app_commands.Choice(name=f"{name} ({team})"[:100], value=str(p.get('id', '')))
-            nats_choices.append(choice) if any(aff in team.lower() for aff in ['nationals', 'senators', 'red wings', 'blue rocks', 'frednats', 'rochester', 'harrisburg', 'wilmington', 'fredericksburg']) else other_choices.append(choice)
-        return (nats_choices + other_choices)[:25]
+            team_lower = team.lower()
+            is_fav = (fav_name and fav_name in team_lower) or any(aff in team_lower for aff in affiliates)
+            fav_choices.append(choice) if is_fav else other_choices.append(choice)
+        return (fav_choices + other_choices)[:25]
 
     @milb.command(name="line", description="Get a minor league player's stat line for today or a specific date")
     @app_commands.describe(player="The minor league player to search for")
@@ -1600,14 +1604,9 @@ class MLBSlash(commands.Cog):
         session = await self.bot.mlb_client.get_session()
         query = current.lower().strip()
 
-        # Pinned entries: WSH org + 4 Nationals affiliates always at top when query is empty
-        PINNED = [
-            app_commands.Choice(name="WSH — Nationals (All Affiliates)", value="WSH"),
-            app_commands.Choice(name="ROC — Rochester Red Wings (Triple-A)", value="ROC"),
-            app_commands.Choice(name="HBG — Harrisburg Senators (Double-A)", value="HBG"),
-            app_commands.Choice(name="WIL — Wilmington Blue Rocks (High-A)", value="WIL"),
-            app_commands.Choice(name="FBG — Fredericksburg Nationals (Single-A)", value="FBG"),
-        ]
+        # Build pinned entries from configured favorite team (if any)
+        raw_pins = getattr(self.bot, 'favorite_team_milb_pins', [])
+        PINNED = [app_commands.Choice(name=p['name'], value=p['value']) for p in raw_pins]
         PINNED_VALUES = {c.value for c in PINNED}
 
         if not query:

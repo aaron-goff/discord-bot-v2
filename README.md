@@ -85,6 +85,16 @@ DISCORD_TOKEN=your_bot_token_here
 
 # Optional: enable /weather and /radar commands (no API key required)
 EXTENDED_COMMANDS=true
+
+# Optional: favorite team — floats this team's players to the top of autocomplete
+FAVORITE_TEAM=WSH
+
+# Optional: always post HR alerts for this team regardless of distance
+# (can be the same as FAVORITE_TEAM or different; omit to disable)
+HR_ALERT_TEAM=WSH
+
+# Optional: Discord channel ID for live game alerts (no-hitters, HR alerts)
+ALERT_CHANNEL_ID=123456789012345678
 ```
 
 ### Run
