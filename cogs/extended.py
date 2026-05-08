@@ -39,21 +39,19 @@ class ExtendedSlash(commands.Cog):
 
         session = await self.bot.mlb_client.get_session()
 
-        # Pre-geocode US zip codes so wttr.in doesn't pick a foreign location
+        # Pre-geocode through Nominatim so wttr.in doesn't pick a foreign location.
+        # Zip codes: hard-restrict to US. Everything else: soft-bias toward US.
         is_us_zip = location.strip().replace('-', '').isdigit() and len(location.strip()) in (5, 9)
-        if is_us_zip:
-            geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(location)}&format=json&limit=1&countrycodes=us"
-            try:
-                async with session.get(geo_url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
-                    geo_data = await resp.json() if resp.status == 200 else []
-                if geo_data:
-                    lat, lon = geo_data[0]['lat'], geo_data[0]['lon']
-                    wttr_query = urllib.parse.quote(f"{lat},{lon}")
-                else:
-                    wttr_query = urllib.parse.quote(location)
-            except Exception:
+        geo_bias = "countrycodes=us" if is_us_zip else "viewbox=-125,24,-66,50&bounded=0"
+        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(location)}&format=json&limit=1&{geo_bias}"
+        try:
+            async with session.get(geo_url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
+                geo_data = await resp.json() if resp.status == 200 else []
+            if geo_data:
+                wttr_query = urllib.parse.quote(f"{geo_data[0]['lat']},{geo_data[0]['lon']}")
+            else:
                 wttr_query = urllib.parse.quote(location)
-        else:
+        except Exception:
             wttr_query = urllib.parse.quote(location)
 
         url = f"https://wttr.in/{wttr_query}?format=j1"
@@ -148,8 +146,8 @@ class ExtendedSlash(commands.Cog):
 
         # 1. Geocode via Nominatim; bias to US for bare zip codes
         is_us_zip = location.strip().replace('-', '').isdigit() and len(location.strip()) in (5, 9)
-        country_param = "&countrycodes=us" if is_us_zip else ""
-        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(location)}&format=json&limit=1{country_param}"
+        geo_bias = "countrycodes=us" if is_us_zip else "viewbox=-125,24,-66,50&bounded=0"
+        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(location)}&format=json&limit=1&{geo_bias}"
         try:
             async with session.get(geo_url, headers={"User-Agent": "discord-bot/1.0"}) as resp:
                 geo_data = await resp.json() if resp.status == 200 else []
@@ -179,8 +177,7 @@ class ExtendedSlash(commands.Cog):
             return
 
         rv_host = rv_data['host']
-        # Use second-to-last frame — the newest frame may not be fully propagated to all CDN nodes yet
-        frame = past_frames[-2] if len(past_frames) >= 2 else past_frames[-1]
+        frame = past_frames[-1]
         rv_path = frame['path']
         from datetime import timezone
         radar_age_secs = int(datetime.now(tz=timezone.utc).timestamp()) - frame['time']
