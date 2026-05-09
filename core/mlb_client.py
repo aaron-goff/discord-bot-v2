@@ -2107,10 +2107,11 @@ class MLBClient:
             else:
                 stat_types_to_fetch = [stat_type]
 
+            milb_suffix = "&leagueListId=milb_all" if milb else ""
             results = []
             for st in stat_types_to_fetch:
                 url = (f"{self.BASE_URL}/people/{player_id}/stats"
-                       f"?stats=byDateRange&startDate={start_date}&endDate={end_date}&group={st}")
+                       f"?stats=byDateRange&startDate={start_date}&endDate={end_date}&group={st}{milb_suffix}")
                 async with session.get(url) as resp:
                     data = await resp.json()
                 found_stats = []
@@ -2149,11 +2150,11 @@ class MLBClient:
                     ))
             return results
 
-        # lastXGames via person hydrate — leagueListId breaks MiLB; season param works for both
-        season = str(datetime.now().year)
+        # lastXGames via person hydrate
+        league_list_id = "milb_all" if milb else "mlb_hist"
         person_url = (
             f"{self.BASE_URL}/people/{player_id}?hydrate=currentTeam,team,"
-            f"stats(type=[lastXGames](team(league)),season={season},limit={num_games},group=[hitting,pitching])"
+            f"stats(type=[lastXGames](team(league)),leagueListId={league_list_id},limit={num_games},group=[hitting,pitching])"
         )
         async with session.get(person_url) as resp:
             person_data = await resp.json()
