@@ -4112,8 +4112,12 @@ class MLBClient:
             async with session.get(url) as resp:
                 data = await resp.json()
                 query = query.lower()
-                for team in data.get('teams', []):
-                    if query in team['name'].lower() or query == team.get('abbreviation', '').lower():
+                teams = data.get('teams', [])
+                for team in teams:
+                    if query == team.get('abbreviation', '').lower():
+                        return team['id']
+                for team in teams:
+                    if query in team['name'].lower():
                         return team['id']
         except:
             pass
