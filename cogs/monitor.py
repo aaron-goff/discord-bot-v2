@@ -322,6 +322,100 @@ class MonitorCog(commands.Cog):
         await asyncio.sleep(NH_ALERT_DELAY)
         await self._post_nh_broken_alert(channel, feed, was_perfect, pitching_abbr)
 
+    async def _delayed_nh_tune_in_alert(self, channel, feed: dict, game_pk: int, pitching_abbr: str, batting_side: str) -> None:
+        await asyncio.sleep(NH_ALERT_DELAY)
+        await self._post_nh_tune_in_alert(channel, feed, game_pk, pitching_abbr, batting_side)
+
+    def _get_next_batters(self, feed: dict, batting_side: str, n: int = 3) -> list:
+        live_data     = feed.get("liveData", {})
+        boxscore      = live_data.get("boxscore", {})
+        batting_order = boxscore.get("teams", {}).get(batting_side, {}).get("battingOrder", [])
+        players       = boxscore.get("teams", {}).get(batting_side, {}).get("players", {})
+        if not batting_order:
+            return []
+        half = "top" if batting_side == "away" else "bottom"
+        all_plays = live_data.get("plays", {}).get("allPlays", [])
+        last_batter_id = None
+        for play in reversed(all_plays):
+            if play.get("about", {}).get("halfInning") == half and play.get("about", {}).get("isComplete", False):
+                last_batter_id = play.get("matchup", {}).get("batter", {}).get("id")
+                break
+        if last_batter_id is None:
+            start_idx = 0
+        else:
+            try:
+                start_idx = (batting_order.index(last_batter_id) + 1) % len(batting_order)
+            except ValueError:
+                start_idx = 0
+        result = []
+        for i in range(min(n, len(batting_order))):
+            idx  = (start_idx + i) % len(batting_order)
+            pid  = batting_order[idx]
+            name = players.get(f"ID{pid}", {}).get("person", {}).get("fullName", "Unknown")
+            result.append({"name": name, "order": idx + 1})
+        return result
+
+    async def _post_nh_tune_in_alert(self, channel, feed: dict, game_pk: int, pitching_abbr: str, batting_side: str) -> None:
+        game_data  = feed.get("gameData", {})
+        live_data  = feed.get("liveData", {})
+        linescore  = live_data.get("linescore", {})
+        flags      = game_data.get("flags", {})
+        is_perfect = flags.get("perfectGame", False)
+
+        away_abbr  = game_data.get("teams", {}).get("away", {}).get("abbreviation", "???")
+        home_abbr  = game_data.get("teams", {}).get("home", {}).get("abbreviation", "???")
+        side_key   = "home" if pitching_abbr == home_abbr else "away"
+
+        inning = linescore.get("currentInning", 0)
+        is_top = linescore.get("isTopInning", True)
+        outs   = linescore.get("outs", 0)
+
+        n      = inning if inning <= 20 else inning % 10
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n, "th")
+        alert_word = "P*RFECT GAME" if is_perfect else "NO-H*TTER"
+        title = f"📺 TUNE IN: {pitching_abbr} GOING FOR THE {alert_word} IN THE {inning}{suffix}!"
+
+        boxscore    = live_data.get("boxscore", {})
+        pitcher_ids = boxscore.get("teams", {}).get(side_key, {}).get("pitchers", [])
+        players     = boxscore.get("teams", {}).get(side_key, {}).get("players", {})
+        pitchers    = []
+        for pid in pitcher_ids:
+            p_data  = players.get(f"ID{pid}", {})
+            p_stats = p_data.get("stats", {}).get("pitching", {})
+            if p_stats and p_stats.get("pitchesThrown", 0) > 0:
+                pitchers.append({
+                    "pitcher": p_data.get("person", {}).get("fullName", "Unknown"),
+                    "ip": p_stats.get("inningsPitched", "0"),
+                    "bb": str(p_stats.get("baseOnBalls", 0)),
+                    "so": str(p_stats.get("strikeOuts", 0)),
+                    "np": str(p_stats.get("pitchesThrown", 0)),
+                })
+
+        away_score = linescore.get("teams", {}).get("away", {}).get("runs", 0)
+        home_score = linescore.get("teams", {}).get("home", {}).get("runs", 0)
+        score_line  = f"{away_abbr} {away_score} — {home_abbr} {home_score}"
+        inning_desc = _inning_label(inning, is_top) + f" | {outs} out{'s' if outs != 1 else ''}"
+
+        batting_abbr = away_abbr if batting_side == "away" else home_abbr
+        next_batters = self._get_next_batters(feed, batting_side)
+        batters_text = "\n".join(f"{b['order']}. {b['name']}" for b in next_batters) if next_batters else "—"
+
+        embed = discord.Embed(
+            title=title,
+            color=discord.Color.gold() if is_perfect else discord.Color.red(),
+        )
+        embed.add_field(name="Score",  value=score_line,  inline=True)
+        embed.add_field(name="Inning", value=inning_desc, inline=True)
+        if pitchers:
+            table = self._build_nh_pitcher_table(pitchers)
+            embed.add_field(name="Pitchers", value=f"```\n{table}\n```", inline=False)
+        embed.add_field(name=f"Next up for {batting_abbr}", value=batters_text, inline=False)
+
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            print(f"[monitor] failed to post NH tune-in alert: {e}")
+
     async def _post_nh_broken_alert(self, channel, feed: dict, was_perfect: bool, pitching_abbr: str = None) -> None:
         game_data = feed.get("gameData", {})
         live_data = feed.get("liveData", {})
@@ -606,11 +700,25 @@ class MonitorCog(commands.Cog):
             # Only alert after the pitching team finishes their half inning
             should_alert = is_final or (home_pitching and not is_top) or (not home_pitching and is_top)
 
-            if stored is None or stored["key"] != alert_key:
-                self._nh_alerted[game_pk] = {"key": alert_key, "perfect": is_pg, "pitching_abbr": nh_pitching}
+            # Tune-in alert: fires when entering the pitching team's half inning at inning 9+
+            entering_pitching_half = (home_pitching and is_top) or (not home_pitching and not is_top)
+            stored_tune_in         = (stored or {}).get("tune_in_inning", 0)
+            should_tune_in         = inning >= 9 and entering_pitching_half and inning > stored_tune_in
+
+            key_changed = stored is None or stored["key"] != alert_key
+            if key_changed or should_tune_in:
+                self._nh_alerted[game_pk] = {
+                    "key":           alert_key,
+                    "perfect":       is_pg,
+                    "pitching_abbr": nh_pitching,
+                    "tune_in_inning": inning if should_tune_in else stored_tune_in,
+                }
                 self._save_nh_state()
-                if should_alert:
+                if key_changed and should_alert:
                     asyncio.create_task(self._delayed_nh_alert(channel, feed, game_pk))
+                if should_tune_in:
+                    batting_side = "away" if home_pitching else "home"
+                    asyncio.create_task(self._delayed_nh_tune_in_alert(channel, feed, game_pk, nh_pitching, batting_side))
         else:
             # Flag was cleared — post break-up alert if we were tracking this game
             nh_changed = False
