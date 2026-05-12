@@ -590,7 +590,9 @@ class MonitorCog(commands.Cog):
         is_nh = flags.get("noHitter", False)
 
         if is_pg or is_nh:
-            # Post once per inning transition
+            # Post once per inning transition, but only after the pitching team completes their half inning:
+            # - Home pitching (top half): alert when is_top=False (top just ended)
+            # - Away pitching (bottom half): alert when is_top=True (bottom just ended)
             alert_key = (inning, "final" if is_final else is_top)
             stored = self._nh_alerted.get(game_pk)
 
@@ -599,11 +601,16 @@ class MonitorCog(commands.Cog):
             nh_home_abbr = game_data.get("teams", {}).get("home", {}).get("abbreviation", "???")
             away_hits    = linescore.get("teams", {}).get("away", {}).get("hits", 0)
             nh_pitching  = nh_home_abbr if away_hits == 0 else nh_away_abbr
+            home_pitching = (nh_pitching == nh_home_abbr)
+
+            # Only alert after the pitching team finishes their half inning
+            should_alert = is_final or (home_pitching and not is_top) or (not home_pitching and is_top)
 
             if stored is None or stored["key"] != alert_key:
-                asyncio.create_task(self._delayed_nh_alert(channel, feed, game_pk))
                 self._nh_alerted[game_pk] = {"key": alert_key, "perfect": is_pg, "pitching_abbr": nh_pitching}
                 self._save_nh_state()
+                if should_alert:
+                    asyncio.create_task(self._delayed_nh_alert(channel, feed, game_pk))
         else:
             # Flag was cleared — post break-up alert if we were tracking this game
             nh_changed = False
