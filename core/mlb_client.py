@@ -1036,7 +1036,7 @@ class BullpenData:
 
         pitcher_name = row.get('name', '')
 
-        if ({name: pitcher_name, team: self.team_name} in pitcher_bad):
+        if ({'name': pitcher_name, 'team': self.team_name} in pitcher_bad):
             return "💩"
         
         # 3 in a row
@@ -4154,7 +4154,7 @@ class MLBClient:
         return {'player': player, 'year': year, 'transactions': transactions}
 
 pitcher_bad = [{
-    name: 'Parker', team: 'wsh'
+    'name': 'Parker', 'team': 'wsh'
 }, {
-    name: 'Littell', team: 'wsh'
+    'name': 'Littell', 'team': 'wsh'
 }]
